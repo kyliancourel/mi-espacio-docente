@@ -2,7 +2,10 @@ import { neon } from "@neondatabase/serverless";
 
 function getCookie(req, name) {
   const cookieHeader = req.headers.cookie || "";
-  const cookies = cookieHeader.split(";").map((cookie) => cookie.trim());
+
+  const cookies = cookieHeader
+    .split(";")
+    .map((cookie) => cookie.trim());
 
   for (const cookie of cookies) {
     const separatorIndex = cookie.indexOf("=");
@@ -22,11 +25,16 @@ function getCookie(req, name) {
 
 export default async function handler(req, res) {
   try {
+    // 1. Autoriser uniquement GET
     if (req.method !== "GET") {
       res.setHeader("Allow", "GET");
-      return res.status(405).send("Méthode non autorisée");
+
+      return res
+        .status(405)
+        .send("Méthode non autorisée");
     }
 
+    // 2. Récupérer les paramètres OAuth
     const code = req.query.code;
     const state = req.query.state;
 
@@ -37,18 +45,32 @@ export default async function handler(req, res) {
       });
     }
 
-    const savedState = getCookie(req, "notion_oauth_state");
+    // 3. Vérifier le state OAuth
+    const savedState = getCookie(
+      req,
+      "notion_oauth_state"
+    );
 
-    if (!state || !savedState || state !== savedState) {
+    if (
+      !state ||
+      !savedState ||
+      state !== savedState
+    ) {
       return res.status(400).json({
         ok: false,
         error: "État OAuth invalide ou expiré.",
       });
     }
 
-    const clientId = process.env.NOTION_CLIENT_ID;
-    const clientSecret = process.env.NOTION_CLIENT_SECRET;
-    const databaseUrl = process.env.DATABASE_URL;
+    // 4. Charger les variables Vercel
+    const clientId =
+      process.env.NOTION_CLIENT_ID;
+
+    const clientSecret =
+      process.env.NOTION_CLIENT_SECRET;
+
+    const databaseUrl =
+      process.env.DATABASE_URL;
 
     if (!clientId || !clientSecret) {
       throw new Error(
@@ -62,22 +84,29 @@ export default async function handler(req, res) {
       );
     }
 
+    // 5. URI OAuth officielle
     const redirectUri =
       "https://mi-espacio-docente.vercel.app/api/notion/callback";
 
+    // 6. Authentification Basic requise
+    // pour l'échange du code OAuth
     const basicAuth = Buffer.from(
       `${clientId.trim()}:${clientSecret.trim()}`
     ).toString("base64");
 
+    // 7. Échanger le code OAuth
+    // contre un access_token Notion
     const tokenResponse = await fetch(
       "https://api.notion.com/v1/oauth/token",
       {
         method: "POST",
+
         headers: {
           Authorization: `Basic ${basicAuth}`,
           "Content-Type": "application/json",
           Accept: "application/json",
         },
+
         body: JSON.stringify({
           grant_type: "authorization_code",
           code,
@@ -86,26 +115,39 @@ export default async function handler(req, res) {
       }
     );
 
-    const tokenData = await tokenResponse.json();
+    const tokenData =
+      await tokenResponse.json();
 
+    // 8. Vérifier la réponse Notion
     if (!tokenResponse.ok) {
-      return res.status(tokenResponse.status).json({
-        ok: false,
-        error: "Échec de l'échange OAuth avec Notion.",
-        details: tokenData,
-      });
+      return res
+        .status(tokenResponse.status)
+        .json({
+          ok: false,
+          error:
+            "Échec de l'échange OAuth avec Notion.",
+          details: tokenData,
+        });
     }
 
-    if (!tokenData.access_token || !tokenData.workspace_id) {
+    if (
+      !tokenData.access_token ||
+      !tokenData.workspace_id
+    ) {
       throw new Error(
         "Réponse OAuth Notion incomplète : access_token ou workspace_id absent."
       );
     }
 
+    // 9. Connexion à Neon
     const sql = neon(databaseUrl);
 
-    const ownerUser = tokenData.owner?.user || null;
+    // 10. Informations du propriétaire
+    const ownerUser =
+      tokenData.owner?.user || null;
 
+    // 11. Enregistrer ou mettre à jour
+    // la connexion Notion dans Neon
     await sql`
       INSERT INTO notion_connections (
         workspace_id,
@@ -141,23 +183,61 @@ export default async function handler(req, res) {
         updated_at = NOW()
     `;
 
-    res.setHeader(
-      "Set-Cookie",
-      "notion_oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
-    );
+    // 12. Cookies
+    //
+    // - Supprimer le state OAuth temporaire
+    // - Enregistrer l'espace Notion connecté
+    //
+    // Le cookie workspace est HttpOnly :
+    // JavaScript côté navigateur ne peut pas le lire.
+    res.setHeader("Set-Cookie", [
+      [
+        "notion_oauth_state=",
+        "Path=/",
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+        "Max-Age=0",
+      ].join("; "),
 
+      [
+        `notion_workspace_id=${encodeURIComponent(
+          tokenData.workspace_id
+        )}`,
+        "Path=/",
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+        "Max-Age=2592000",
+      ].join("; "),
+    ]);
+
+    // 13. Réponse de succès
+    //
+    // L'access_token n'est volontairement
+    // jamais renvoyé au navigateur.
     return res.status(200).json({
       ok: true,
-      message: "Connexion Notion réussie et enregistrée.",
-      workspace_id: tokenData.workspace_id,
-      workspace_name: tokenData.workspace_name || null,
+      message:
+        "Connexion Notion réussie et enregistrée.",
+
+      workspace_id:
+        tokenData.workspace_id,
+
+      workspace_name:
+        tokenData.workspace_name || null,
     });
   } catch (error) {
-    console.error("Erreur callback Notion :", error);
+    console.error(
+      "Erreur callback Notion :",
+      error
+    );
 
     return res.status(500).json({
       ok: false,
-      error: error.message,
+      error:
+        error.message ||
+        "Erreur interne du serveur.",
     });
   }
 }
