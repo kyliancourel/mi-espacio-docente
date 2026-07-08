@@ -1,4 +1,4 @@
-const NOTION_VERSION = "2026-03-11";
+const NOTION_VERSION = "2022-06-28";
 
 const IDS = {
   occurrencesDb: "39440bd7-969d-8096-b622-ee9c8ed30757",
@@ -17,7 +17,10 @@ function notionHeaders() {
 }
 
 async function notion(path, options = {}) {
-  const response = await fetch(`https://api.notion.com/v1${path}`, {
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  const url = `https://api.notion.com/v1${cleanPath}`;
+
+  const response = await fetch(url, {
     ...options,
     headers: {
       ...notionHeaders(),
@@ -25,11 +28,18 @@ async function notion(path, options = {}) {
     },
   });
 
-  const data = await response.json();
+  const text = await response.text();
+
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
 
   if (!response.ok) {
     throw new Error(
-      `Notion ${response.status}: ${JSON.stringify(data)}`
+      `Notion ${response.status} sur ${url}: ${JSON.stringify(data)}`
     );
   }
 
