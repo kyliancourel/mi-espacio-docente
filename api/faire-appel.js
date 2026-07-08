@@ -1,3 +1,5 @@
+import { neon } from "@neondatabase/serverless";
+
 const NOTION_VERSION = "2022-06-28";
 
 const IDS = {
@@ -8,22 +10,83 @@ const IDS = {
   feuilleTemplate: "39740bd7-969d-808f-b743-c8e7f9e4d928",
 };
 
-function notionHeaders() {
+function getCookie(req, name) {
+  const cookieHeader = req.headers.cookie || "";
+  const cookies = cookieHeader.split(";").map((cookie) => cookie.trim());
+
+  for (const cookie of cookies) {
+    const separatorIndex = cookie.indexOf("=");
+
+    if (separatorIndex === -1) continue;
+
+    const key = cookie.slice(0, separatorIndex);
+    const value = cookie.slice(separatorIndex + 1);
+
+    if (key === name) {
+      return decodeURIComponent(value);
+    }
+  }
+
+  return null;
+}
+
+async function getNotionConnection(req) {
+  if (!process.env.DATABASE_URL) {
+    throw new Error("Variable DATABASE_URL absente dans Vercel.");
+  }
+
+  const workspaceId = getCookie(req, "notion_workspace_id");
+
+  if (!workspaceId) {
+    const error = new Error(
+      "Aucun espace Notion connecté pour cette session."
+    );
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const sql = neon(process.env.DATABASE_URL);
+
+  const rows = await sql`
+    SELECT
+      workspace_id,
+      workspace_name,
+      workspace_icon,
+      access_token
+    FROM notion_connections
+    WHERE workspace_id = ${workspaceId}
+    LIMIT 1
+  `;
+
+  const connection = rows[0];
+
+  if (!connection || !connection.access_token) {
+    const error = new Error(
+      "Connexion Notion introuvable ou expirée."
+    );
+    error.statusCode = 401;
+    throw error;
+  }
+
+  return connection;
+}
+
+function notionHeaders(accessToken) {
   return {
-    Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
+    Authorization: `Bearer ${accessToken}`,
     "Notion-Version": NOTION_VERSION,
     "Content-Type": "application/json",
   };
 }
 
-async function notion(path, options = {}) {
+async function notion(accessToken, path, options = {}) {
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
   const url = `https://api.notion.com/v1${cleanPath}`;
 
   const response = await fetch(url, {
     ...options,
     headers: {
-      ...notionHeaders(),
+      ...notionHeaders(accessToken),
       ...(options.headers || {}),
     },
   });
@@ -31,6 +94,7 @@ async function notion(path, options = {}) {
   const text = await response.text();
 
   let data;
+
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
@@ -52,6 +116,7 @@ function notionPageUrl(pageId) {
 
 function htmlRedirect(url) {
   const safeUrl = JSON.stringify(url);
+
   const escapedHref = String(url)
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
@@ -71,7 +136,11 @@ function htmlRedirect(url) {
 </head>
 <body>
   <p>Ouverture de la feuille d'appel...</p>
-  <p><a href="${escapedHref}">Cliquez ici si la redirection ne démarre pas.</a></p>
+  <p>
+    <a href="${escapedHref}">
+      Cliquez ici si la redirection ne démarre pas.
+    </a>
+  </p>
 </body>
 </html>`;
 }
@@ -84,12 +153,16 @@ function redirectToPage(res, pageOrId) {
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
+
   return res.status(200).send(htmlRedirect(url));
 }
 
 function getRelationIds(page, propertyName) {
   const property = page?.properties?.[propertyName];
-  if (!property || property.type !== "relation") return [];
+
+  if (!property || property.type !== "relation") {
+    return [];
+  }
 
   return (property.relation || [])
     .map((item) => item.id)
@@ -98,7 +171,10 @@ function getRelationIds(page, propertyName) {
 
 function getTitle(page, propertyName) {
   const property = page?.properties?.[propertyName];
-  if (!property || property.type !== "title") return "";
+
+  if (!property || property.type !== "title") {
+    return "";
+  }
 
   return (property.title || [])
     .map((item) => item.plain_text || "")
@@ -135,27 +211,28 @@ function formatParisTime(date) {
   }).format(date);
 }
 
-async function findExistingSheet(occurrence) {
-  // Contrôle n°1 : relation directe depuis l'occurrence
-  // Nom exact observé dans ton JSON de diagnostic.
+async function findExistingSheet(accessToken, occurrence) {
   const linkedSheetIds = getRelationIds(
     occurrence,
     "📋 Feuilles d’appel"
   );
 
   if (linkedSheetIds.length > 0) {
-    const sheet = await notion(`/pages/${linkedSheetIds[0]}`, {
-      method: "GET",
-    });
+    const sheet = await notion(
+      accessToken,
+      `/pages/${linkedSheetIds[0]}`,
+      {
+        method: "GET",
+      }
+    );
 
     if (!sheet.archived && !sheet.in_trash) {
       return sheet;
     }
   }
 
-  // Contrôle n°2 : recherche inverse dans DB — Feuilles d'appel
-  // Protège aussi si la relation côté occurrence n'est pas encore visible.
   const result = await notion(
+    accessToken,
     `/databases/${IDS.feuillesAppelDb}/query`,
     {
       method: "POST",
@@ -171,12 +248,18 @@ async function findExistingSheet(occurrence) {
     }
   );
 
-  return (result.results || []).find(
-    (page) => !page.archived && !page.in_trash
-  ) || null;
+  return (
+    (result.results || []).find(
+      (page) => !page.archived && !page.in_trash
+    ) || null
+  );
 }
 
-async function findExistingPresence(inscriptionId, feuilleId = null) {
+async function findExistingPresence(
+  accessToken,
+  inscriptionId,
+  feuilleId = null
+) {
   const filters = [
     {
       property: "🎒 Inscription élève",
@@ -186,11 +269,8 @@ async function findExistingPresence(inscriptionId, feuilleId = null) {
     },
   ];
 
-  // Si la propriété existe dans ta DB Présences, on pourra ensuite
-  // renforcer encore le verrou par feuille. Pour l'instant, on ne
-  // suppose pas un nom de propriété non confirmé.
-
   const result = await notion(
+    accessToken,
     `/databases/${IDS.presencesDb}/query`,
     {
       method: "POST",
@@ -198,35 +278,39 @@ async function findExistingPresence(inscriptionId, feuilleId = null) {
         filter:
           filters.length === 1
             ? filters[0]
-            : { and: filters },
+            : {
+                and: filters,
+              },
         page_size: 10,
       }),
     }
   );
 
-  return (result.results || []).find(
-    (page) => !page.archived && !page.in_trash
-  ) || null;
+  return (
+    (result.results || []).find(
+      (page) => !page.archived && !page.in_trash
+    ) || null
+  );
 }
 
 export default async function handler(req, res) {
   try {
-    if (!process.env.NOTION_TOKEN) {
-      throw new Error(
-        "Variable NOTION_TOKEN absente dans Vercel."
-      );
-    }
-
     if (req.method !== "GET") {
       res.setHeader("Allow", "GET");
       return res.status(405).send("Méthode non autorisée");
     }
 
+    // 1. Charger la connexion OAuth correspondant
+    // à l'espace Notion de cette session
+    const connection = await getNotionConnection(req);
+    const accessToken = connection.access_token;
+
     const now = new Date();
     const nowIso = now.toISOString();
 
-    // 1. Trouver le cours actuellement en cours
+    // 2. Trouver le cours actuellement en cours
     const occurrenceResult = await notion(
+      accessToken,
       `/databases/${IDS.occurrencesDb}/query`,
       {
         method: "POST",
@@ -260,15 +344,22 @@ export default async function handler(req, res) {
         .send("Aucun cours en cours n'a été trouvé.");
     }
 
-    // 2. Vérifier immédiatement si une feuille existe déjà
-    const existingSheet = await findExistingSheet(occurrence);
+    // 3. Vérifier immédiatement si une feuille existe déjà
+    const existingSheet = await findExistingSheet(
+      accessToken,
+      occurrence
+    );
 
     if (existingSheet) {
       return redirectToPage(res, existingSheet);
     }
 
-    // 3. Récupérer la classe liée
-    const classeIds = getRelationIds(occurrence, "🎓 Classe");
+    // 4. Récupérer la classe liée
+    const classeIds = getRelationIds(
+      occurrence,
+      "🎓 Classe"
+    );
+
     const classeId = classeIds[0];
 
     if (!classeId) {
@@ -277,14 +368,19 @@ export default async function handler(req, res) {
       );
     }
 
-    const classe = await notion(`/pages/${classeId}`, {
-      method: "GET",
-    });
+    const classe = await notion(
+      accessToken,
+      `/pages/${classeId}`,
+      {
+        method: "GET",
+      }
+    );
 
     const classeNom = getPageTitle(classe) || "Classe";
 
-    // 4. Trouver les inscriptions de la classe
+    // 5. Trouver les inscriptions de la classe
     const inscriptionsResult = await notion(
+      accessToken,
       `/databases/${IDS.inscriptionsDb}/query`,
       {
         method: "POST",
@@ -308,20 +404,25 @@ export default async function handler(req, res) {
       );
     }
 
-    // 5. Recontrôle juste avant création
-    // Réduit fortement le risque en cas de double clic.
-    const sheetAfterLookup = await findExistingSheet(occurrence);
+    // 6. Recontrôle juste avant création
+    const sheetAfterLookup = await findExistingSheet(
+      accessToken,
+      occurrence
+    );
 
     if (sheetAfterLookup) {
       return redirectToPage(res, sheetAfterLookup);
     }
 
-    // 6. Créer les présences manquantes
+    // 7. Créer les présences manquantes
     const presenceIds = [];
 
     for (const inscription of inscriptions) {
       const existingPresence =
-        await findExistingPresence(inscription.id);
+        await findExistingPresence(
+          accessToken,
+          inscription.id
+        );
 
       if (existingPresence) {
         presenceIds.push(existingPresence.id);
@@ -331,113 +432,131 @@ export default async function handler(req, res) {
       const nomInscription =
         getTitle(inscription, "🎒 Inscription") || "Élève";
 
-      const presence = await notion("/pages", {
-        method: "POST",
-        body: JSON.stringify({
-          parent: {
-            database_id: IDS.presencesDb,
-          },
-          properties: {
-            "👤 Entrée de présence": {
-              title: [
-                {
-                  text: {
-                    content: nomInscription,
+      const presence = await notion(
+        accessToken,
+        "/pages",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            parent: {
+              database_id: IDS.presencesDb,
+            },
+
+            properties: {
+              "👤 Entrée de présence": {
+                title: [
+                  {
+                    text: {
+                      content: nomInscription,
+                    },
                   },
+                ],
+              },
+
+              "🎒 Inscription élève": {
+                relation: [
+                  {
+                    id: inscription.id,
+                  },
+                ],
+              },
+
+              "✅ Statut de présence": {
+                select: {
+                  name: "🟢 Présent(e)",
                 },
-              ],
-            },
-            "🎒 Inscription élève": {
-              relation: [
-                {
-                  id: inscription.id,
-                },
-              ],
-            },
-            "✅ Statut de présence": {
-              select: {
-                name: "🟢 Présent(e)",
               },
             },
-          },
-        }),
-      });
+          }),
+        }
+      );
 
       presenceIds.push(presence.id);
     }
 
-    // 7. Dernier contrôle avant création de la feuille
-    const sheetBeforeCreate = await findExistingSheet(occurrence);
+    // 8. Dernier contrôle avant création de la feuille
+    const sheetBeforeCreate = await findExistingSheet(
+      accessToken,
+      occurrence
+    );
 
     if (sheetBeforeCreate) {
       return redirectToPage(res, sheetBeforeCreate);
     }
 
-    // 8. Préparer le titre
+    // 9. Préparer le titre
     const titreAppel =
       `APPEL - ${classeNom} - ` +
       `${formatParisDate(now)} - ${formatParisTime(now)}`;
 
-    // 9. Créer la feuille
-    const feuille = await notion("/pages", {
-      method: "POST",
-      body: JSON.stringify({
-        parent: {
-          database_id: IDS.feuillesAppelDb,
-        },
+    // 10. Créer la feuille
+    const feuille = await notion(
+      accessToken,
+      "/pages",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          parent: {
+            database_id: IDS.feuillesAppelDb,
+          },
 
-        template: {
-          type: "template_id",
-          template_id: IDS.feuilleTemplate,
-          timezone: "Europe/Paris",
-        },
+          template: {
+            type: "template_id",
+            template_id: IDS.feuilleTemplate,
+            timezone: "Europe/Paris",
+          },
 
-        properties: {
-          "📝 Entrée d’appel": {
-            title: [
-              {
-                text: {
-                  content: titreAppel,
+          properties: {
+            "📝 Entrée d’appel": {
+              title: [
+                {
+                  text: {
+                    content: titreAppel,
+                  },
                 },
+              ],
+            },
+
+            "🎓 Classe": {
+              relation: [
+                {
+                  id: classeId,
+                },
+              ],
+            },
+
+            "👤 Présences": {
+              relation: presenceIds.map((id) => ({
+                id,
+              })),
+            },
+
+            "📅 Occurrence de cours": {
+              relation: [
+                {
+                  id: occurrence.id,
+                },
+              ],
+            },
+
+            "📅 Date et heure de l’appel": {
+              date: {
+                start: nowIso,
               },
-            ],
-          },
-
-          "🎓 Classe": {
-            relation: [
-              {
-                id: classeId,
-              },
-            ],
-          },
-
-          "👤 Présences": {
-            relation: presenceIds.map((id) => ({ id })),
-          },
-
-          "📅 Occurrence de cours": {
-            relation: [
-              {
-                id: occurrence.id,
-              },
-            ],
-          },
-
-          "📅 Date et heure de l’appel": {
-            date: {
-              start: nowIso,
             },
           },
-        },
-      }),
-    });
+        }),
+      }
+    );
 
-    // 10. Ouvrir la feuille
+    // 11. Ouvrir la feuille
     return redirectToPage(res, feuille);
   } catch (error) {
     console.error(error);
 
-    return res.status(500).json({
+    const statusCode = error.statusCode || 500;
+
+    return res.status(statusCode).json({
       ok: false,
       error: error.message,
     });
