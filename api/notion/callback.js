@@ -1,9 +1,8 @@
+import { neon } from "@neondatabase/serverless";
+
 function getCookie(req, name) {
   const cookieHeader = req.headers.cookie || "";
-
-  const cookies = cookieHeader
-    .split(";")
-    .map((cookie) => cookie.trim());
+  const cookies = cookieHeader.split(";").map((cookie) => cookie.trim());
 
   for (const cookie of cookies) {
     const separatorIndex = cookie.indexOf("=");
@@ -47,9 +46,9 @@ export default async function handler(req, res) {
       });
     }
 
-    const clientId = process.env.NOTION_CLIENT_ID?.trim();
-    const clientSecret =
-      process.env.NOTION_CLIENT_SECRET?.trim();
+    const clientId = process.env.NOTION_CLIENT_ID;
+    const clientSecret = process.env.NOTION_CLIENT_SECRET;
+    const databaseUrl = process.env.DATABASE_URL;
 
     if (!clientId || !clientSecret) {
       throw new Error(
@@ -57,26 +56,28 @@ export default async function handler(req, res) {
       );
     }
 
+    if (!databaseUrl) {
+      throw new Error(
+        "Variable DATABASE_URL absente dans Vercel."
+      );
+    }
+
     const redirectUri =
       "https://mi-espacio-docente.vercel.app/api/notion/callback";
 
-    // Authentification OAuth du client
     const basicAuth = Buffer.from(
-      `${clientId}:${clientSecret}`
+      `${clientId.trim()}:${clientSecret.trim()}`
     ).toString("base64");
 
-    // Échange du code OAuth contre un access token
     const tokenResponse = await fetch(
       "https://api.notion.com/v1/oauth/token",
       {
         method: "POST",
-
         headers: {
           Authorization: `Basic ${basicAuth}`,
           "Content-Type": "application/json",
-          "Notion-Version": "2026-03-11",
+          Accept: "application/json",
         },
-
         body: JSON.stringify({
           grant_type: "authorization_code",
           code,
@@ -85,19 +86,7 @@ export default async function handler(req, res) {
       }
     );
 
-    const responseText = await tokenResponse.text();
-
-    let tokenData;
-
-    try {
-      tokenData = responseText
-        ? JSON.parse(responseText)
-        : {};
-    } catch {
-      tokenData = {
-        raw: responseText,
-      };
-    }
+    const tokenData = await tokenResponse.json();
 
     if (!tokenResponse.ok) {
       return res.status(tokenResponse.status).json({
@@ -107,26 +96,64 @@ export default async function handler(req, res) {
       });
     }
 
-    // Ne jamais afficher access_token dans la réponse
-    const safeResult = {
-      ok: true,
-      message: "Connexion Notion réussie.",
-      workspace_id: tokenData.workspace_id || null,
-      workspace_name: tokenData.workspace_name || null,
-      workspace_icon: tokenData.workspace_icon || null,
-      bot_id: tokenData.bot_id || null,
-      owner: tokenData.owner || null,
-    };
+    if (!tokenData.access_token || !tokenData.workspace_id) {
+      throw new Error(
+        "Réponse OAuth Notion incomplète : access_token ou workspace_id absent."
+      );
+    }
 
-    // Suppression du cookie OAuth temporaire
+    const sql = neon(databaseUrl);
+
+    const ownerUser = tokenData.owner?.user || null;
+
+    await sql`
+      INSERT INTO notion_connections (
+        workspace_id,
+        workspace_name,
+        workspace_icon,
+        bot_id,
+        owner_user_id,
+        owner_name,
+        owner_email,
+        access_token,
+        updated_at
+      )
+      VALUES (
+        ${tokenData.workspace_id},
+        ${tokenData.workspace_name || null},
+        ${tokenData.workspace_icon || null},
+        ${tokenData.bot_id || null},
+        ${ownerUser?.id || null},
+        ${ownerUser?.name || null},
+        ${ownerUser?.person?.email || null},
+        ${tokenData.access_token},
+        NOW()
+      )
+      ON CONFLICT (workspace_id)
+      DO UPDATE SET
+        workspace_name = EXCLUDED.workspace_name,
+        workspace_icon = EXCLUDED.workspace_icon,
+        bot_id = EXCLUDED.bot_id,
+        owner_user_id = EXCLUDED.owner_user_id,
+        owner_name = EXCLUDED.owner_name,
+        owner_email = EXCLUDED.owner_email,
+        access_token = EXCLUDED.access_token,
+        updated_at = NOW()
+    `;
+
     res.setHeader(
       "Set-Cookie",
       "notion_oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
     );
 
-    return res.status(200).json(safeResult);
+    return res.status(200).json({
+      ok: true,
+      message: "Connexion Notion réussie et enregistrée.",
+      workspace_id: tokenData.workspace_id,
+      workspace_name: tokenData.workspace_name || null,
+    });
   } catch (error) {
-    console.error(error);
+    console.error("Erreur callback Notion :", error);
 
     return res.status(500).json({
       ok: false,
