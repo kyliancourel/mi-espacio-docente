@@ -57,25 +57,23 @@ export default async function handler(req, res) {
     const redirectUri =
       "https://mi-espacio-docente.vercel.app/api/notion/callback";
 
-    const basicAuth = Buffer.from(
-      `${clientId}:${clientSecret}`
-    ).toString("base64");
-
-    const tokenResponse = await fetch(
-      "https://api.notion.com/v1/oauth/token",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Basic ${basicAuth}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          grant_type: "authorization_code",
-          code,
-          redirect_uri: redirectUri,
-        }),
-      }
-    );
+   const tokenResponse = await fetch(
+  "https://api.notion.com/v1/oauth/token",
+  {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Notion-Version": "2026-03-11",
+    },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId.trim(),
+      client_secret: clientSecret.trim(),
+    }),
+  }
+);
 
     const tokenData = await tokenResponse.json();
 
