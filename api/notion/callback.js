@@ -1,7 +1,9 @@
 function getCookie(req, name) {
   const cookieHeader = req.headers.cookie || "";
 
-  const cookies = cookieHeader.split(";").map((cookie) => cookie.trim());
+  const cookies = cookieHeader
+    .split(";")
+    .map((cookie) => cookie.trim());
 
   for (const cookie of cookies) {
     const separatorIndex = cookie.indexOf("=");
@@ -45,8 +47,9 @@ export default async function handler(req, res) {
       });
     }
 
-    const clientId = process.env.NOTION_CLIENT_ID;
-    const clientSecret = process.env.NOTION_CLIENT_SECRET;
+    const clientId = process.env.NOTION_CLIENT_ID?.trim();
+    const clientSecret =
+      process.env.NOTION_CLIENT_SECRET?.trim();
 
     if (!clientId || !clientSecret) {
       throw new Error(
@@ -57,25 +60,44 @@ export default async function handler(req, res) {
     const redirectUri =
       "https://mi-espacio-docente.vercel.app/api/notion/callback";
 
-   const tokenResponse = await fetch(
-  "https://api.notion.com/v1/oauth/token",
-  {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Notion-Version": "2026-03-11",
-    },
-    body: JSON.stringify({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      client_id: clientId.trim(),
-      client_secret: clientSecret.trim(),
-    }),
-  }
-);
+    // Authentification OAuth du client
+    const basicAuth = Buffer.from(
+      `${clientId}:${clientSecret}`
+    ).toString("base64");
 
-    const tokenData = await tokenResponse.json();
+    // Échange du code OAuth contre un access token
+    const tokenResponse = await fetch(
+      "https://api.notion.com/v1/oauth/token",
+      {
+        method: "POST",
+
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          "Content-Type": "application/json",
+          "Notion-Version": "2026-03-11",
+        },
+
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirectUri,
+        }),
+      }
+    );
+
+    const responseText = await tokenResponse.text();
+
+    let tokenData;
+
+    try {
+      tokenData = responseText
+        ? JSON.parse(responseText)
+        : {};
+    } catch {
+      tokenData = {
+        raw: responseText,
+      };
+    }
 
     if (!tokenResponse.ok) {
       return res.status(tokenResponse.status).json({
@@ -96,6 +118,7 @@ export default async function handler(req, res) {
       owner: tokenData.owner || null,
     };
 
+    // Suppression du cookie OAuth temporaire
     res.setHeader(
       "Set-Cookie",
       "notion_oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
