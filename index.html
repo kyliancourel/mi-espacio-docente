@@ -108,6 +108,18 @@
       line-height: 1.5;
     }
 
+    .card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.card-link:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+}
+
     .status {
       margin-top: 50px;
       background: #fff7ed;
@@ -165,14 +177,14 @@
 
     <section class="cards">
 
-      <article class="card">
-        <div class="card-icon">📋</div>
-        <h3>Faire l'appel</h3>
-        <p>
-          Ouvrir automatiquement la feuille d'appel correspondant
-          au cours actuellement en cours.
-        </p>
-      </article>
+      <a href="/api/faire-appel" class="card card-link">
+  <div class="icon">📋</div>
+  <h2>Faire l'appel</h2>
+  <p>
+    Ouvrir automatiquement la feuille d'appel correspondant
+    au cours actuellement en cours.
+  </p>
+</a>
 
       <article class="card">
         <div class="card-icon">👨‍🎓</div>
