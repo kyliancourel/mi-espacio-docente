@@ -2,7 +2,6 @@ import { neon } from "@neondatabase/serverless";
 import crypto from "node:crypto";
 
 const NOTION_VERSION = "2026-03-11";
-
 const MAX_DEPTH = 20;
 
 const STATUS = {
@@ -13,8 +12,14 @@ const STATUS = {
   CONFLICT: "conflict",
   MISSING_REQUIRES_MANUAL_INSTALL:
     "missing_requires_manual_install",
-  UNTRACKED_BASELINE:
-    "untracked_baseline",
+  OFFICIAL_TEMPLATE_NOT_REGISTERED:
+    "official_template_not_registered",
+  OFFICIAL_TEMPLATE_INACTIVE:
+    "official_template_inactive",
+  UNTRACKED_LOCAL_BASELINE:
+    "untracked_local_baseline",
+  UNTRACKED_OFFICIAL_BASELINE:
+    "untracked_official_baseline",
   INCONSISTENT_TRACKING:
     "inconsistent_tracking",
   UNREADABLE: "unreadable",
@@ -23,20 +28,39 @@ const STATUS = {
 
 /*
   MI ESPACIO DOCENTE
-  MOTEUR DE MISE À JOUR — DRY RUN STRICT
+  MOTEUR DE MISE À JOUR V2
+  DRY RUN STRICT
+
+  ARCHITECTURE :
+
+  notion_official_templates
+    = vérité officielle centrale
+
+  notion_workspace_templates
+    = état local d'installation
+
+  Notion réel
+    = état réel actuel du template
 
   Ce endpoint :
   - lit la connexion OAuth du workspace ;
-  - lit notion_workspace_templates ;
+  - lit le registre officiel central ;
+  - lit l'état local du workspace ;
   - relit les templates réels dans Notion ;
-  - vérifie leur existence réelle ;
-  - calcule un fingerprint structurel local ;
-  - compare versions et fingerprints connus ;
-  - détecte les modifications locales ;
-  - produit un plan de mise à jour ;
+  - calcule leur fingerprint réel ;
+  - compare :
+      1. référence officielle centrale,
+      2. dernier état local connu,
+      3. état local réel actuel ;
+  - détecte :
+      current,
+      update_available,
+      local_changes_detected,
+      conflict,
+      missing_requires_manual_install ;
   - NE MODIFIE RIEN.
 
-  Interdictions volontaires :
+  INTERDICTIONS :
   - aucun PATCH Notion ;
   - aucun POST Notion ;
   - aucun DELETE Notion ;
@@ -44,20 +68,22 @@ const STATUS = {
   - aucun UPDATE Neon ;
   - aucun DELETE Neon.
 
-  IMPORTANT :
-  official_fingerprint représente la référence
-  officielle connue/enregistrée.
+  RÈGLE DE SÉCURITÉ CENTRALE :
 
-  local_fingerprint représente le dernier état
-  local connu/enregistré.
+  Une mise à jour automatique n'est candidate
+  que si :
+  - une nouvelle version officielle existe ;
+  - update_if_outdated = true ;
+  - propagate_existing_installations = true ;
+  - overwrite_local_changes n'est pas requis ;
+  - le template réel correspond encore au
+    dernier fingerprint local connu.
 
-  Le fingerprint calculé ici représente l'état
-  réel du template local au moment du scan.
-
-  Tant que official_fingerprint est NULL,
-  aucune mise à jour automatique ne doit être
-  autorisée : le statut devient
-  untracked_baseline.
+  Ainsi :
+  - ancien template intact => update_available
+  - ancien template personnalisé => conflict
+  - template actuel personnalisé =>
+    local_changes_detected
 */
 
 function getCookie(req, name) {
@@ -299,39 +325,82 @@ async function getContext(req) {
     throw error;
   }
 
-  const templateRows = await sql`
-    SELECT
-      id,
-      workspace_id,
-      template_key,
-      component_key,
-      notion_template_id,
-      notion_data_source_id,
-      notion_template_name,
-      official_version,
-      installed_version,
-      official_fingerprint,
-      local_fingerprint,
-      sync_status,
-      is_default,
-      locally_modified,
-      conflict_detected,
-      last_detected_at,
-      last_synced_at,
-      created_at,
-      updated_at
-    FROM notion_workspace_templates
-    WHERE workspace_id = ${workspaceId}
-    ORDER BY
-      component_key ASC,
-      template_key ASC
-  `;
+  /*
+    État local du workspace.
+    Les anciennes colonnes official_*
+    sont encore lues uniquement à des fins
+    de diagnostic/migration.
+
+    Elles ne sont PLUS la vérité officielle.
+  */
+  const workspaceTemplateRows =
+    await sql`
+      SELECT
+        id,
+        workspace_id,
+        template_key,
+        component_key,
+        notion_template_id,
+        notion_data_source_id,
+        notion_template_name,
+        official_version,
+        installed_version,
+        official_fingerprint,
+        local_fingerprint,
+        sync_status,
+        is_default,
+        locally_modified,
+        conflict_detected,
+        last_detected_at,
+        last_synced_at,
+        created_at,
+        updated_at
+      FROM notion_workspace_templates
+      WHERE workspace_id = ${workspaceId}
+      ORDER BY
+        component_key ASC,
+        template_key ASC
+    `;
+
+  /*
+    Vérité officielle centrale.
+  */
+  const officialTemplateRows =
+    await sql`
+      SELECT
+        id,
+        template_key,
+        component_key,
+        notion_template_name,
+        master_workspace_id,
+        master_notion_template_id,
+        master_notion_data_source_id,
+        official_version,
+        official_fingerprint,
+        is_default,
+        is_active,
+        propagate_new_installations,
+        propagate_existing_installations,
+        create_if_missing,
+        update_if_outdated,
+        overwrite_local_changes,
+        local_changes_policy,
+        created_at,
+        updated_at
+      FROM notion_official_templates
+      ORDER BY
+        component_key ASC,
+        template_key ASC
+    `;
 
   return {
-    sql,
     connection,
-    templates:
-      templateRows || [],
+
+    workspaceTemplates:
+      workspaceTemplateRows || [],
+
+    officialTemplates:
+      officialTemplateRows || [],
   };
 }
 
@@ -514,7 +583,6 @@ function sanitizeBlockPayload(
     "language",
     "checked",
     "expression",
-    "caption",
     "url",
   ];
 
@@ -749,11 +817,97 @@ function findTemplatesByExactName(
   );
 }
 
+function buildOfficialMap(
+  officialTemplates
+) {
+  return new Map(
+    officialTemplates.map(
+      (template) => [
+        template.template_key,
+        template,
+      ]
+    )
+  );
+}
+
+function buildWorkspaceMap(
+  workspaceTemplates
+) {
+  return new Map(
+    workspaceTemplates.map(
+      (template) => [
+        template.template_key,
+        template,
+      ]
+    )
+  );
+}
+
 function determineStatus({
-  row,
+  local,
+  official,
   realTemplate,
   currentFingerprint,
 }) {
+  if (!official) {
+    return {
+      status:
+        STATUS
+          .OFFICIAL_TEMPLATE_NOT_REGISTERED,
+
+      reason:
+        "Aucune référence centrale n'existe " +
+        "dans notion_official_templates.",
+    };
+  }
+
+  if (!official.is_active) {
+    return {
+      status:
+        STATUS.OFFICIAL_TEMPLATE_INACTIVE,
+
+      reason:
+        "Le template officiel central est " +
+        "désactivé.",
+    };
+  }
+
+  if (!official.official_fingerprint) {
+    return {
+      status:
+        STATUS
+          .UNTRACKED_OFFICIAL_BASELINE,
+
+      reason:
+        "Le registre central ne contient " +
+        "aucun official_fingerprint.",
+    };
+  }
+
+  if (!local) {
+    return {
+      status:
+        STATUS
+          .MISSING_REQUIRES_MANUAL_INSTALL,
+
+      reason:
+        official.create_if_missing
+          ? (
+              "Le template officiel doit être " +
+              "présent dans ce workspace, mais " +
+              "aucune installation locale n'est " +
+              "enregistrée. La création native " +
+              "d'un nouvel objet template n'est " +
+              "pas prouvée par l'API testée."
+            )
+          : (
+              "Aucune installation locale n'est " +
+              "enregistrée et la politique " +
+              "create_if_missing est désactivée."
+            ),
+    };
+  }
+
   if (!realTemplate) {
     return {
       status:
@@ -761,51 +915,35 @@ function determineStatus({
           .MISSING_REQUIRES_MANUAL_INSTALL,
 
       reason:
-        "Le template enregistré dans Neon " +
-        "n'existe plus dans la data source " +
-        "Notion accessible.",
+        "L'installation locale est enregistrée " +
+        "dans Neon mais le template réel n'est " +
+        "plus détecté dans Notion.",
     };
   }
 
   const officialVersion =
-    row.official_version || null;
+    official.official_version || null;
 
   const installedVersion =
-    row.installed_version || null;
+    local.installed_version || null;
 
   const officialFingerprint =
-    row.official_fingerprint || null;
+    official.official_fingerprint || null;
 
   const storedLocalFingerprint =
-    row.local_fingerprint || null;
+    local.local_fingerprint || null;
 
-  /*
-    Sans baseline officielle,
-    aucune synchronisation automatique
-    n'est sûre.
-  */
-  if (!officialFingerprint) {
+  if (!storedLocalFingerprint) {
     return {
       status:
-        STATUS.UNTRACKED_BASELINE,
+        STATUS
+          .UNTRACKED_LOCAL_BASELINE,
 
       reason:
-        "Aucun official_fingerprint n'est " +
-        "enregistré. Le moteur refuse de " +
-        "déduire une mise à jour sûre.",
+        "Aucun local_fingerprint n'est " +
+        "enregistré pour cette installation.",
     };
   }
-
-  const localDiffersFromOfficial =
-    currentFingerprint !==
-    officialFingerprint;
-
-  const localChangedSinceStoredScan =
-    Boolean(
-      storedLocalFingerprint &&
-      currentFingerprint !==
-        storedLocalFingerprint
-    );
 
   const versionComparison =
     compareVersions(
@@ -819,29 +957,21 @@ function determineStatus({
   const versionAhead =
     versionComparison > 0;
 
-  /*
-    Cas idéal :
-    version et fingerprint officiels.
-  */
-  if (
-    !versionOutdated &&
-    !versionAhead &&
-    !localDiffersFromOfficial
-  ) {
-    return {
-      status:
-        STATUS.CURRENT,
+  const currentMatchesOfficial =
+    currentFingerprint ===
+    officialFingerprint;
 
-      reason:
-        "Version installée et fingerprint " +
-        "réel correspondent à la référence " +
-        "officielle connue.",
-    };
-  }
+  const currentMatchesStoredLocal =
+    currentFingerprint ===
+    storedLocalFingerprint;
+
+  const storedLocalMatchesOfficial =
+    storedLocalFingerprint ===
+    officialFingerprint;
 
   /*
-    Version locale en avance :
-    état incohérent à ne jamais écraser.
+    Version locale supérieure à l'officielle :
+    incohérence de suivi.
   */
   if (versionAhead) {
     return {
@@ -850,19 +980,58 @@ function determineStatus({
 
       reason:
         "La version installée est supérieure " +
-        "à la version officielle enregistrée.",
+        "à la version officielle centrale.",
     };
   }
 
   /*
-    Une modification depuis le dernier
-    fingerprint local connu est un signal
-    fort de personnalisation.
+    Version identique + contenu officiel exact.
   */
   if (
-    localChangedSinceStoredScan &&
-    localDiffersFromOfficial
+    !versionOutdated &&
+    currentMatchesOfficial
   ) {
+    return {
+      status:
+        STATUS.CURRENT,
+
+      reason:
+        "Version installée et fingerprint réel " +
+        "correspondent à la référence officielle " +
+        "centrale.",
+    };
+  }
+
+  /*
+    Version obsolète, mais le contenu réel
+    correspond déjà au nouveau maître.
+
+    Cela peut arriver après une synchronisation
+    Notion réussie avant mise à jour du tracking.
+  */
+  if (
+    versionOutdated &&
+    currentMatchesOfficial
+  ) {
+    return {
+      status:
+        STATUS.INCONSISTENT_TRACKING,
+
+      reason:
+        "Le contenu réel correspond déjà au " +
+        "nouveau fingerprint officiel, mais " +
+        "installed_version est encore obsolète.",
+    };
+  }
+
+  /*
+    Le contenu réel a changé depuis le dernier
+    état local connu.
+
+    C'est le signal principal de modification
+    locale.
+  */
+  if (!currentMatchesStoredLocal) {
     return {
       status:
         versionOutdated
@@ -873,25 +1042,23 @@ function determineStatus({
       reason:
         versionOutdated
           ? (
-              "Une mise à jour officielle est " +
-              "disponible et le template local " +
-              "a changé depuis son dernier " +
-              "fingerprint enregistré."
+              "Une mise à jour officielle existe " +
+              "et le template réel a changé depuis " +
+              "le dernier fingerprint local connu."
             )
           : (
-              "Le template local a changé depuis " +
-              "son dernier fingerprint enregistré."
+              "Le template réel a changé depuis " +
+              "le dernier fingerprint local connu."
             ),
     };
   }
 
   /*
-    Le flag historique Neon protège aussi
-    contre tout écrasement automatique.
+    Les flags historiques restent protecteurs.
   */
   if (
-    row.locally_modified ||
-    row.conflict_detected
+    local.locally_modified ||
+    local.conflict_detected
   ) {
     return {
       status:
@@ -901,39 +1068,84 @@ function determineStatus({
               .LOCAL_CHANGES_DETECTED,
 
       reason:
-        "Les indicateurs Neon signalent une " +
-        "modification locale ou un conflit.",
+        "Les indicateurs locaux Neon signalent " +
+        "une modification locale ou un conflit.",
     };
   }
 
   /*
-    Version obsolète + contenu encore égal
-    à la référence officielle connue :
-    candidat sûr à la mise à jour.
+    Cas central de mise à jour sûre :
+
+    - version locale obsolète ;
+    - état réel inchangé depuis la dernière
+      baseline locale ;
+    - propagation autorisée ;
+    - mise à jour autorisée.
+
+    Le fait que stored_local diffère du nouveau
+    fingerprint officiel est NORMAL :
+    il représente l'ancienne version installée.
   */
   if (
     versionOutdated &&
-    !localDiffersFromOfficial
+    currentMatchesStoredLocal
   ) {
+    if (
+      !official
+        .propagate_existing_installations
+    ) {
+      return {
+        status:
+          STATUS.INCONSISTENT_TRACKING,
+
+        reason:
+          "Une nouvelle version officielle existe " +
+          "mais la propagation aux installations " +
+          "existantes est désactivée.",
+      };
+    }
+
+    if (!official.update_if_outdated) {
+      return {
+        status:
+          STATUS.INCONSISTENT_TRACKING,
+
+        reason:
+          "Une nouvelle version officielle existe " +
+          "mais update_if_outdated est désactivé.",
+      };
+    }
+
     return {
       status:
         STATUS.UPDATE_AVAILABLE,
 
       reason:
-        "La version installée est obsolète " +
-        "et aucune divergence locale n'est " +
-        "détectée par rapport au fingerprint " +
-        "officiel connu.",
+        storedLocalMatchesOfficial
+          ? (
+              "La version installée est obsolète, " +
+              "le template réel est inchangé et " +
+              "reste sur une baseline compatible."
+            )
+          : (
+              "La version installée est obsolète " +
+              "et le template réel correspond " +
+              "exactement au dernier fingerprint " +
+              "local connu. Aucune modification " +
+              "locale récente n'est détectée."
+            ),
     };
   }
 
   /*
-    Même version mais divergence :
-    personnalisation locale.
+    Même version, contenu réel inchangé depuis
+    le dernier scan, mais différent du maître :
+    personnalisation locale persistante.
   */
   if (
     !versionOutdated &&
-    localDiffersFromOfficial
+    currentMatchesStoredLocal &&
+    !currentMatchesOfficial
   ) {
     return {
       status:
@@ -941,28 +1153,9 @@ function determineStatus({
           .LOCAL_CHANGES_DETECTED,
 
       reason:
-        "La version est actuelle mais le " +
-        "contenu réel diverge du fingerprint " +
-        "officiel connu.",
-    };
-  }
-
-  /*
-    Version obsolète + divergence non
-    expliquée : protection maximale.
-  */
-  if (
-    versionOutdated &&
-    localDiffersFromOfficial
-  ) {
-    return {
-      status:
-        STATUS.CONFLICT,
-
-      reason:
-        "La version installée est obsolète " +
-        "et le contenu réel diverge de la " +
-        "référence officielle connue.",
+        "La version installée est actuelle, mais " +
+        "la baseline locale diffère de la référence " +
+        "officielle centrale.",
     };
   }
 
@@ -971,13 +1164,14 @@ function determineStatus({
       STATUS.UNKNOWN,
 
     reason:
-      "L'état du template ne correspond " +
-      "à aucun cas sûr connu.",
+      "L'état du template ne correspond à " +
+      "aucun cas sûr connu.",
   };
 }
 
 function buildRecommendedAction(
-  status
+  status,
+  official = null
 ) {
   switch (status) {
     case STATUS.CURRENT:
@@ -991,7 +1185,16 @@ function buildRecommendedAction(
       return {
         action:
           "native_sync_candidate",
-        automatic_sync_allowed: true,
+
+        automatic_sync_allowed:
+          Boolean(
+            official &&
+            official.is_active &&
+            official
+              .propagate_existing_installations &&
+            official.update_if_outdated
+          ),
+
         requires_user_action: false,
       };
 
@@ -1021,19 +1224,47 @@ function buildRecommendedAction(
         requires_user_action: true,
       };
 
-    case STATUS.UNTRACKED_BASELINE:
+    case STATUS
+      .OFFICIAL_TEMPLATE_NOT_REGISTERED:
       return {
         action:
-          "initialize_fingerprint_baseline",
+          "register_official_template",
+        automatic_sync_allowed: false,
+        requires_user_action: true,
+      };
+
+    case STATUS
+      .OFFICIAL_TEMPLATE_INACTIVE:
+      return {
+        action:
+          "none_official_inactive",
         automatic_sync_allowed: false,
         requires_user_action: false,
+      };
+
+    case STATUS
+      .UNTRACKED_LOCAL_BASELINE:
+      return {
+        action:
+          "initialize_local_fingerprint_baseline",
+        automatic_sync_allowed: false,
+        requires_user_action: false,
+      };
+
+    case STATUS
+      .UNTRACKED_OFFICIAL_BASELINE:
+      return {
+        action:
+          "initialize_official_fingerprint_baseline",
+        automatic_sync_allowed: false,
+        requires_user_action: true,
       };
 
     case STATUS
       .INCONSISTENT_TRACKING:
       return {
         action:
-          "inspect_version_tracking",
+          "inspect_tracking_state",
         automatic_sync_allowed: false,
         requires_user_action: true,
       };
@@ -1056,35 +1287,48 @@ function buildRecommendedAction(
   }
 }
 
-async function analyzeTemplate({
+async function analyzeInstalledTemplate({
   accessToken,
-  row,
+  local,
+  official,
   templatesCache,
 }) {
   const dataSourceId =
-    row.notion_data_source_id;
+    local.notion_data_source_id;
 
   if (!dataSourceId) {
     return {
       template_key:
-        row.template_key,
+        local.template_key,
 
       component_key:
-        row.component_key,
+        local.component_key,
 
       name:
-        row.notion_template_name,
+        local.notion_template_name,
+
+      official_reference:
+        official
+          ? {
+              version:
+                official.official_version,
+
+              fingerprint:
+                official.official_fingerprint,
+            }
+          : null,
 
       status:
         STATUS.UNREADABLE,
 
       reason:
-        "Aucun notion_data_source_id " +
+        "Aucun notion_data_source_id local " +
         "n'est enregistré.",
 
       recommended_action:
         buildRecommendedAction(
-          STATUS.UNREADABLE
+          STATUS.UNREADABLE,
+          official
         ),
     };
   }
@@ -1107,13 +1351,10 @@ async function analyzeTemplate({
     );
   }
 
-  /*
-    Priorité absolue à l'ID.
-  */
   let realTemplate =
     findTemplateById(
       realTemplates,
-      row.notion_template_id
+      local.notion_template_id
     );
 
   let detectionMethod =
@@ -1121,15 +1362,11 @@ async function analyzeTemplate({
       ? "id"
       : null;
 
-  /*
-    Fallback exact par nom uniquement
-    si un seul résultat existe.
-  */
   if (!realTemplate) {
     const nameMatches =
       findTemplatesByExactName(
         realTemplates,
-        row.notion_template_name
+        local.notion_template_name
       );
 
     if (nameMatches.length === 1) {
@@ -1143,16 +1380,16 @@ async function analyzeTemplate({
     if (nameMatches.length > 1) {
       return {
         template_key:
-          row.template_key,
+          local.template_key,
 
         component_key:
-          row.component_key,
+          local.component_key,
 
         name:
-          row.notion_template_name,
+          local.notion_template_name,
 
         registered_template_id:
-          row.notion_template_id,
+          local.notion_template_id,
 
         data_source_id:
           dataSourceId,
@@ -1161,8 +1398,8 @@ async function analyzeTemplate({
           STATUS.CONFLICT,
 
         reason:
-          "L'ID enregistré n'a pas été trouvé " +
-          "et plusieurs templates portent " +
+          "L'ID local enregistré n'a pas été " +
+          "trouvé et plusieurs templates portent " +
           "exactement le même nom.",
 
         duplicate_candidates:
@@ -1178,7 +1415,8 @@ async function analyzeTemplate({
 
         recommended_action:
           buildRecommendedAction(
-            STATUS.CONFLICT
+            STATUS.CONFLICT,
+            official
           ),
       };
     }
@@ -1187,26 +1425,38 @@ async function analyzeTemplate({
   if (!realTemplate) {
     const decision =
       determineStatus({
-        row,
+        local,
+        official,
         realTemplate: null,
         currentFingerprint: null,
       });
 
     return {
       template_key:
-        row.template_key,
+        local.template_key,
 
       component_key:
-        row.component_key,
+        local.component_key,
 
       name:
-        row.notion_template_name,
+        local.notion_template_name,
 
       registered_template_id:
-        row.notion_template_id,
+        local.notion_template_id,
 
       data_source_id:
         dataSourceId,
+
+      official_reference:
+        official
+          ? {
+              version:
+                official.official_version,
+
+              fingerprint:
+                official.official_fingerprint,
+            }
+          : null,
 
       status:
         decision.status,
@@ -1216,7 +1466,8 @@ async function analyzeTemplate({
 
       recommended_action:
         buildRecommendedAction(
-          decision.status
+          decision.status,
+          official
         ),
     };
   }
@@ -1237,16 +1488,16 @@ async function analyzeTemplate({
   } catch (error) {
     return {
       template_key:
-        row.template_key,
+        local.template_key,
 
       component_key:
-        row.component_key,
+        local.component_key,
 
       name:
-        row.notion_template_name,
+        local.notion_template_name,
 
       registered_template_id:
-        row.notion_template_id,
+        local.notion_template_id,
 
       detected_template_id:
         realTemplateId,
@@ -1269,7 +1520,8 @@ async function analyzeTemplate({
 
       recommended_action:
         buildRecommendedAction(
-          STATUS.UNREADABLE
+          STATUS.UNREADABLE,
+          official
         ),
     };
   }
@@ -1288,29 +1540,32 @@ async function analyzeTemplate({
 
   const decision =
     determineStatus({
-      row,
+      local,
+      official,
       realTemplate,
       currentFingerprint,
     });
 
   const versionComparison =
-    compareVersions(
-      row.installed_version,
-      row.official_version
-    );
+    official
+      ? compareVersions(
+          local.installed_version,
+          official.official_version
+        )
+      : null;
 
   return {
     template_key:
-      row.template_key,
+      local.template_key,
 
     component_key:
-      row.component_key,
+      local.component_key,
 
     name:
-      row.notion_template_name,
+      local.notion_template_name,
 
     registered_template_id:
-      row.notion_template_id,
+      local.notion_template_id,
 
     detected_template_id:
       realTemplateId,
@@ -1324,61 +1579,148 @@ async function analyzeTemplate({
     page_readable:
       Boolean(page?.id),
 
+    official_reference:
+      official
+        ? {
+            template_key:
+              official.template_key,
+
+            component_key:
+              official.component_key,
+
+            name:
+              official.notion_template_name,
+
+            version:
+              official.official_version,
+
+            fingerprint:
+              official.official_fingerprint,
+
+            master_workspace_id:
+              official.master_workspace_id,
+
+            master_template_id:
+              official
+                .master_notion_template_id,
+
+            master_data_source_id:
+              official
+                .master_notion_data_source_id,
+
+            is_active:
+              official.is_active,
+          }
+        : null,
+
     versions: {
       official:
-        row.official_version,
+        official
+          ?.official_version ||
+        null,
 
       installed:
-        row.installed_version,
+        local.installed_version,
 
       comparison:
         versionComparison,
 
       outdated:
-        versionComparison < 0,
+        versionComparison !== null
+          ? versionComparison < 0
+          : null,
 
       ahead:
-        versionComparison > 0,
+        versionComparison !== null
+          ? versionComparison > 0
+          : null,
     },
 
     fingerprints: {
       official:
-        row.official_fingerprint,
+        official
+          ?.official_fingerprint ||
+        null,
 
       stored_local:
-        row.local_fingerprint,
+        local.local_fingerprint,
 
       current_local:
         currentFingerprint,
 
+      legacy_workspace_official:
+        local.official_fingerprint,
+
       current_matches_official:
         Boolean(
-          row.official_fingerprint &&
+          official
+            ?.official_fingerprint &&
           currentFingerprint ===
-            row.official_fingerprint
+            official.official_fingerprint
         ),
 
       current_matches_stored_local:
         Boolean(
-          row.local_fingerprint &&
+          local.local_fingerprint &&
           currentFingerprint ===
-            row.local_fingerprint
+            local.local_fingerprint
+        ),
+
+      stored_local_matches_official:
+        Boolean(
+          local.local_fingerprint &&
+          official
+            ?.official_fingerprint &&
+          local.local_fingerprint ===
+            official.official_fingerprint
         ),
     },
 
-    neon_flags: {
+    local_tracking: {
       sync_status:
-        row.sync_status,
+        local.sync_status,
 
       locally_modified:
-        row.locally_modified,
+        local.locally_modified,
 
       conflict_detected:
-        row.conflict_detected,
+        local.conflict_detected,
 
       is_default:
-        row.is_default,
+        local.is_default,
+
+      last_detected_at:
+        local.last_detected_at,
+
+      last_synced_at:
+        local.last_synced_at,
     },
+
+    propagation_policy:
+      official
+        ? {
+            new_installations:
+              official
+                .propagate_new_installations,
+
+            existing_installations:
+              official
+                .propagate_existing_installations,
+
+            create_if_missing:
+              official.create_if_missing,
+
+            update_if_outdated:
+              official.update_if_outdated,
+
+            overwrite_local_changes:
+              official
+                .overwrite_local_changes,
+
+            local_changes_policy:
+              official.local_changes_policy,
+          }
+        : null,
 
     snapshot,
 
@@ -1390,7 +1732,89 @@ async function analyzeTemplate({
 
     recommended_action:
       buildRecommendedAction(
-        decision.status
+        decision.status,
+        official
+      ),
+  };
+}
+
+function analyzeMissingLocalInstallation(
+  official
+) {
+  const decision =
+    determineStatus({
+      local: null,
+      official,
+      realTemplate: null,
+      currentFingerprint: null,
+    });
+
+  return {
+    template_key:
+      official.template_key,
+
+    component_key:
+      official.component_key,
+
+    name:
+      official.notion_template_name,
+
+    local_installation_registered:
+      false,
+
+    official_reference: {
+      version:
+        official.official_version,
+
+      fingerprint:
+        official.official_fingerprint,
+
+      master_workspace_id:
+        official.master_workspace_id,
+
+      master_template_id:
+        official.master_notion_template_id,
+
+      master_data_source_id:
+        official
+          .master_notion_data_source_id,
+
+      is_active:
+        official.is_active,
+    },
+
+    propagation_policy: {
+      new_installations:
+        official
+          .propagate_new_installations,
+
+      existing_installations:
+        official
+          .propagate_existing_installations,
+
+      create_if_missing:
+        official.create_if_missing,
+
+      update_if_outdated:
+        official.update_if_outdated,
+
+      overwrite_local_changes:
+        official.overwrite_local_changes,
+
+      local_changes_policy:
+        official.local_changes_policy,
+    },
+
+    status:
+      decision.status,
+
+    reason:
+      decision.reason,
+
+    recommended_action:
+      buildRecommendedAction(
+        decision.status,
+        official
       ),
   };
 }
@@ -1441,9 +1865,19 @@ function buildSummary(
         true
     ).length;
 
+  const currentTemplates =
+    analyses.filter(
+      (analysis) =>
+        analysis.status ===
+        STATUS.CURRENT
+    ).length;
+
   return {
     total_templates:
       analyses.length,
+
+    current_templates:
+      currentTemplates,
 
     by_status:
       byStatus,
@@ -1479,26 +1913,37 @@ export default async function handler(
 
     const {
       connection,
-      templates,
+      workspaceTemplates,
+      officialTemplates,
     } = await getContext(req);
 
     const accessToken =
       connection.access_token;
 
-    if (templates.length === 0) {
+    if (officialTemplates.length === 0) {
       return res
         .status(409)
         .json({
           ok: false,
 
-          error:
-            "Aucun template n'est enregistré " +
-            "dans notion_workspace_templates " +
-            "pour ce workspace.",
-
           dry_run: true,
+
+          error:
+            "Le registre central " +
+            "notion_official_templates " +
+            "est vide.",
         });
     }
+
+    const officialMap =
+      buildOfficialMap(
+        officialTemplates
+      );
+
+    const workspaceMap =
+      buildWorkspaceMap(
+        workspaceTemplates
+      );
 
     const templatesCache =
       new Map();
@@ -1506,17 +1951,37 @@ export default async function handler(
     const analyses = [];
 
     /*
-      Analyse volontairement séquentielle :
-      - limite la pression sur l'API Notion ;
-      - facilite le diagnostic ;
-      - évite un burst de requêtes récursives.
+      1. Analyse de toutes les références
+         officielles centrales.
+
+      Cela permet aussi de détecter un template
+      officiel absent du workspace local.
     */
-    for (const row of templates) {
+    for (
+      const official
+      of officialTemplates
+    ) {
+      const local =
+        workspaceMap.get(
+          official.template_key
+        );
+
+      if (!local) {
+        analyses.push(
+          analyzeMissingLocalInstallation(
+            official
+          )
+        );
+
+        continue;
+      }
+
       try {
         const analysis =
-          await analyzeTemplate({
+          await analyzeInstalledTemplate({
             accessToken,
-            row,
+            local,
+            official,
             templatesCache,
           });
 
@@ -1526,13 +1991,13 @@ export default async function handler(
       } catch (error) {
         analyses.push({
           template_key:
-            row.template_key,
+            official.template_key,
 
           component_key:
-            row.component_key,
+            official.component_key,
 
           name:
-            row.notion_template_name,
+            official.notion_template_name,
 
           status:
             STATUS.UNREADABLE,
@@ -1546,10 +2011,66 @@ export default async function handler(
 
           recommended_action:
             buildRecommendedAction(
-              STATUS.UNREADABLE
+              STATUS.UNREADABLE,
+              official
             ),
         });
       }
+    }
+
+    /*
+      2. Détection des installations locales
+         qui n'existent plus dans le registre
+         officiel central.
+
+      Elles ne doivent jamais être supprimées
+      automatiquement.
+    */
+    for (
+      const local
+      of workspaceTemplates
+    ) {
+      if (
+        officialMap.has(
+          local.template_key
+        )
+      ) {
+        continue;
+      }
+
+      analyses.push({
+        template_key:
+          local.template_key,
+
+        component_key:
+          local.component_key,
+
+        name:
+          local.notion_template_name,
+
+        registered_template_id:
+          local.notion_template_id,
+
+        data_source_id:
+          local.notion_data_source_id,
+
+        status:
+          STATUS
+            .OFFICIAL_TEMPLATE_NOT_REGISTERED,
+
+        reason:
+          "Cette installation locale existe " +
+          "mais aucune référence officielle " +
+          "centrale ne correspond à son " +
+          "template_key.",
+
+        recommended_action:
+          buildRecommendedAction(
+            STATUS
+              .OFFICIAL_TEMPLATE_NOT_REGISTERED,
+            null
+          ),
+      });
     }
 
     const summary =
@@ -1563,9 +2084,12 @@ export default async function handler(
         ok: true,
 
         message:
-          "Analyse dry-run des mises à jour " +
+          "Analyse V2 dry-run des mises à jour " +
           "de templates terminée. " +
           "Aucune modification effectuée.",
+
+        engine_version:
+          "2.0.0",
 
         dry_run: true,
 
@@ -1579,6 +2103,29 @@ export default async function handler(
           name:
             connection.workspace_name ||
             null,
+        },
+
+        registry: {
+          source:
+            "notion_official_templates",
+
+          official_template_count:
+            officialTemplates.length,
+
+          active_official_template_count:
+            officialTemplates.filter(
+              (template) =>
+                template.is_active
+            ).length,
+
+          local_installation_count:
+            workspaceTemplates.length,
+
+          central_truth_enabled:
+            true,
+
+          legacy_workspace_official_fields:
+            "diagnostic_only",
         },
 
         safety: {
@@ -1596,6 +2143,9 @@ export default async function handler(
 
           automatic_sync_executed:
             false,
+
+          overwrite_local_changes:
+            false,
         },
 
         summary,
@@ -1603,27 +2153,45 @@ export default async function handler(
         templates:
           analyses,
 
-        next_engine_capabilities: {
+        engine_capabilities: {
+          central_official_registry:
+            true,
+
+          three_way_comparison:
+            true,
+
+          compares:
+            [
+              "official_central_fingerprint",
+              "stored_local_fingerprint",
+              "current_real_local_fingerprint",
+            ],
+
           native_full_sync_proven:
             true,
 
-          overwrite_local_changes:
+          native_full_sync_enabled:
             false,
 
           missing_template_creation:
             "unsupported_by_tested_public_api",
 
-          safe_sync_requires:
+          local_change_protection:
+            true,
+
+          safe_sync_candidate_requires:
             [
-              "official_fingerprint",
+              "official_template_active",
               "version_outdated",
-              "no_local_divergence",
+              "current_matches_stored_local",
+              "propagate_existing_installations",
+              "update_if_outdated",
             ],
         },
       });
   } catch (error) {
     console.error(
-      "Erreur update dry-run :",
+      "Erreur update V2 dry-run :",
       error
     );
 
@@ -1633,6 +2201,9 @@ export default async function handler(
       )
       .json({
         ok: false,
+
+        engine_version:
+          "2.0.0",
 
         dry_run: true,
 
