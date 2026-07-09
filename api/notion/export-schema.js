@@ -9,6 +9,7 @@ const NOTION_VERSION = "2022-06-28";
   - cherche uniquement ces 33 titres ;
   - détecte les absences et doublons ;
   - exporte toutes les propriétés réelles ;
+  - affiche les bases accessibles non appariées ;
   - ne modifie rien dans Notion ;
   - ne modifie rien dans Neon.
 */
@@ -389,6 +390,58 @@ function findExactMatches(
   );
 }
 
+/*
+  Retourne toutes les bases accessibles
+  qui n'ont pas été associées à un schéma.
+
+  Cela permet notamment de repérer :
+  - un emoji différent ;
+  - un tiret différent ;
+  - une espace différente ;
+  - une variation de titre.
+*/
+function findUnmatchedDatabases(
+  databases,
+  schemas
+) {
+  const matchedIds = new Set(
+    Object.values(schemas)
+      .map(
+        (schema) =>
+          schema.database_id
+      )
+      .filter(Boolean)
+  );
+
+  return databases
+    .filter(
+      (database) =>
+        !matchedIds.has(database.id)
+    )
+    .map(
+      (database) => ({
+        id:
+          database.id,
+
+        title:
+          getDatabaseTitle(
+            database
+          ),
+
+        url:
+          database.url || null,
+
+        property_count:
+          Object.keys(
+            database.properties || {}
+          ).length,
+
+        properties:
+          exportProperties(database),
+      })
+    );
+}
+
 export default async function handler(
   req,
   res
@@ -471,7 +524,8 @@ export default async function handler(
         continue;
       }
 
-      const database = matches[0];
+      const database =
+        matches[0];
 
       schemas[componentKey] = {
         title:
@@ -502,6 +556,16 @@ export default async function handler(
       Object.keys(
         OFFICIAL_DATABASES
       ).length;
+
+    /*
+      Identifier les bases accessibles
+      qui n'ont pas été appariées.
+    */
+    const unmatchedDatabases =
+      findUnmatchedDatabases(
+        databases,
+        schemas
+      );
 
     return res.status(200).json({
       ok:
@@ -542,10 +606,17 @@ export default async function handler(
 
         ambiguous_count:
           ambiguous.length,
+
+        unmatched_database_count:
+          unmatchedDatabases.length,
       },
 
       missing,
+
       ambiguous,
+
+      unmatched_databases:
+        unmatchedDatabases,
 
       schemas,
     });
