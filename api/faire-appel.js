@@ -2,14 +2,6 @@ import { neon } from "@neondatabase/serverless";
 
 const NOTION_VERSION = "2022-06-28";
 
-const IDS = {
-  occurrencesDb: "39440bd7-969d-8096-b622-ee9c8ed30757",
-  inscriptionsDb: "39440bd7-969d-80a4-8346-fb9f05141744",
-  presencesDb: "39540bd7-969d-8012-8566-daea2c7f2742",
-  feuillesAppelDb: "39540bd7-969d-8052-a10b-f07a5c691a9f",
-  feuilleTemplate: "39740bd7-969d-808f-b743-c8e7f9e4d928",
-};
-
 function getCookie(req, name) {
   const cookieHeader = req.headers.cookie || "";
 
@@ -33,7 +25,7 @@ function getCookie(req, name) {
   return null;
 }
 
-async function getNotionConnection(req) {
+async function getNotionContext(req) {
   const databaseUrl = process.env.DATABASE_URL;
 
   if (!databaseUrl) {
@@ -61,18 +53,30 @@ async function getNotionConnection(req) {
 
   const rows = await sql`
     SELECT
-      workspace_id,
-      workspace_name,
-      workspace_icon,
-      access_token
-    FROM notion_connections
-    WHERE workspace_id = ${workspaceId}
+      c.workspace_id,
+      c.workspace_name,
+      c.workspace_icon,
+      c.access_token,
+
+      cfg.occurrences_db_id,
+      cfg.inscriptions_db_id,
+      cfg.presences_db_id,
+      cfg.feuilles_appel_db_id,
+      cfg.feuille_template_id
+
+    FROM notion_connections AS c
+
+    LEFT JOIN notion_workspace_config AS cfg
+      ON cfg.workspace_id = c.workspace_id
+
+    WHERE c.workspace_id = ${workspaceId}
+
     LIMIT 1
   `;
 
-  const connection = rows[0];
+  const context = rows[0];
 
-  if (!connection || !connection.access_token) {
+  if (!context || !context.access_token) {
     const error = new Error(
       "Connexion Notion introuvable ou expirée."
     );
@@ -82,7 +86,68 @@ async function getNotionConnection(req) {
     throw error;
   }
 
-  return connection;
+  const missingConfig = [];
+
+  if (!context.occurrences_db_id) {
+    missingConfig.push("occurrences_db_id");
+  }
+
+  if (!context.inscriptions_db_id) {
+    missingConfig.push("inscriptions_db_id");
+  }
+
+  if (!context.presences_db_id) {
+    missingConfig.push("presences_db_id");
+  }
+
+  if (!context.feuilles_appel_db_id) {
+    missingConfig.push("feuilles_appel_db_id");
+  }
+
+  if (!context.feuille_template_id) {
+    missingConfig.push("feuille_template_id");
+  }
+
+  if (missingConfig.length > 0) {
+    const error = new Error(
+      "Configuration Mi Espacio Docente incomplète pour cet espace Notion : " +
+      missingConfig.join(", ")
+    );
+
+    error.statusCode = 409;
+
+    throw error;
+  }
+
+  return {
+    workspaceId: context.workspace_id,
+
+    workspaceName:
+      context.workspace_name || null,
+
+    workspaceIcon:
+      context.workspace_icon || null,
+
+    accessToken:
+      context.access_token,
+
+    ids: {
+      occurrencesDb:
+        context.occurrences_db_id,
+
+      inscriptionsDb:
+        context.inscriptions_db_id,
+
+      presencesDb:
+        context.presences_db_id,
+
+      feuillesAppelDb:
+        context.feuilles_appel_db_id,
+
+      feuilleTemplate:
+        context.feuille_template_id,
+    },
+  };
 }
 
 function notionHeaders(accessToken) {
@@ -293,6 +358,7 @@ function formatParisTime(date) {
 
 async function findExistingSheet(
   accessToken,
+  ids,
   occurrence
 ) {
   // Contrôle 1 :
@@ -323,7 +389,7 @@ async function findExistingSheet(
   // recherche inverse dans la DB
   const result = await notion(
     accessToken,
-    `/databases/${IDS.feuillesAppelDb}/query`,
+    `/databases/${ids.feuillesAppelDb}/query`,
     {
       method: "POST",
 
@@ -365,12 +431,16 @@ export default async function handler(
         .send("Méthode non autorisée");
     }
 
-    // 2. Charger la connexion OAuth
-    const connection =
-      await getNotionConnection(req);
+    // 2. Charger le contexte complet :
+    // token OAuth + configuration du workspace
+    const context =
+      await getNotionContext(req);
 
     const accessToken =
-      connection.access_token;
+      context.accessToken;
+
+    const ids =
+      context.ids;
 
     const now = new Date();
     const nowIso = now.toISOString();
@@ -378,7 +448,7 @@ export default async function handler(
     // 3. Trouver le cours en cours
     const occurrenceResult = await notion(
       accessToken,
-      `/databases/${IDS.occurrencesDb}/query`,
+      `/databases/${ids.occurrencesDb}/query`,
       {
         method: "POST",
 
@@ -425,6 +495,7 @@ export default async function handler(
     const existingSheet =
       await findExistingSheet(
         accessToken,
+        ids,
         occurrence
       );
 
@@ -466,7 +537,7 @@ export default async function handler(
     const inscriptionsResult =
       await notion(
         accessToken,
-        `/databases/${IDS.inscriptionsDb}/query`,
+        `/databases/${ids.inscriptionsDb}/query`,
         {
           method: "POST",
 
@@ -498,6 +569,7 @@ export default async function handler(
     const sheetAfterLookup =
       await findExistingSheet(
         accessToken,
+        ids,
         occurrence
       );
 
@@ -525,13 +597,13 @@ export default async function handler(
         body: JSON.stringify({
           parent: {
             database_id:
-              IDS.feuillesAppelDb,
+              ids.feuillesAppelDb,
           },
 
           template: {
             type: "template_id",
             template_id:
-              IDS.feuilleTemplate,
+              ids.feuilleTemplate,
             timezone: "Europe/Paris",
           },
 
@@ -572,12 +644,8 @@ export default async function handler(
       }
     );
 
-    // 10. Créer une présence NEUVE
+    // 10. Créer une présence neuve
     // pour chaque inscription
-    //
-    // Important :
-    // on ne recherche plus une ancienne
-    // présence par inscription.
     const presenceIds = [];
 
     for (const inscription of inscriptions) {
@@ -596,7 +664,7 @@ export default async function handler(
           body: JSON.stringify({
             parent: {
               database_id:
-                IDS.presencesDb,
+                ids.presencesDb,
             },
 
             properties: {
