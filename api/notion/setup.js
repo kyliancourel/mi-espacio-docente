@@ -2,6 +2,50 @@ import { neon } from "@neondatabase/serverless";
 
 const NOTION_VERSION = "2022-06-28";
 
+const REQUIRED_DATABASES = {
+  occurrences: {
+    title: "📆 DB — Occurrences de cours",
+    requiredProperties: {
+      "📆 Cours prévu": "title",
+      "📅 Date et heure": "date",
+      "🏁 Fin": "date",
+      "🎓 Classe": "relation",
+      "📋 Feuilles d’appel": "relation",
+    },
+  },
+
+  inscriptions: {
+    title: "🎒 DB — Inscriptions élèves",
+    requiredProperties: {
+      "🎒 Inscription": "title",
+      "🎓 Classe": "relation",
+      "👨‍🎓 Élève": "relation",
+      "👤 Présences": "relation",
+    },
+  },
+
+  presences: {
+    title: "👤 DB — Présences",
+    requiredProperties: {
+      "👤 Entrée de présence": "title",
+      "🎒 Inscription élève": "relation",
+      "✅ Statut de présence": "select",
+      "📋 Feuille d’appel": "relation",
+    },
+  },
+
+  feuillesAppel: {
+    title: "📝 DB — Feuilles d’appel",
+    requiredProperties: {
+      "📝 Entrée d’appel": "title",
+      "🎓 Classe": "relation",
+      "👤 Présences": "relation",
+      "📅 Occurrence de cours": "relation",
+      "📅 Date et heure de l’appel": "date",
+    },
+  },
+};
+
 function getCookie(req, name) {
   const cookieHeader = req.headers.cookie || "";
 
@@ -68,10 +112,14 @@ async function notion(
   }
 
   if (!response.ok) {
-    throw new Error(
+    const error = new Error(
       `Notion ${response.status} sur ${url}: ` +
       `${JSON.stringify(data)}`
     );
+
+    error.statusCode = response.status;
+
+    throw error;
   }
 
   return data;
@@ -125,13 +173,16 @@ async function getConnection(req) {
     throw error;
   }
 
-  return connection;
+  return {
+    sql,
+    connection,
+  };
 }
 
 async function searchAllDatabases(accessToken) {
   const databases = [];
 
-  let startCursor = undefined;
+  let startCursor;
   let hasMore = true;
 
   while (hasMore) {
@@ -162,11 +213,142 @@ async function searchAllDatabases(accessToken) {
     );
 
     hasMore = Boolean(result.has_more);
+
     startCursor =
       result.next_cursor || undefined;
   }
 
   return databases;
+}
+
+function getDatabaseTitle(database) {
+  return (
+    getPlainText(database?.title || []) ||
+    "(Sans titre)"
+  );
+}
+
+function validateDatabase(
+  database,
+  requiredProperties
+) {
+  const actualProperties =
+    database?.properties || {};
+
+  const missing = [];
+  const wrongTypes = [];
+
+  for (
+    const [propertyName, expectedType]
+    of Object.entries(requiredProperties)
+  ) {
+    const actualProperty =
+      actualProperties[propertyName];
+
+    if (!actualProperty) {
+      missing.push(propertyName);
+      continue;
+    }
+
+    if (actualProperty.type !== expectedType) {
+      wrongTypes.push({
+        property: propertyName,
+        expected: expectedType,
+        actual:
+          actualProperty.type || null,
+      });
+    }
+  }
+
+  return {
+    valid:
+      missing.length === 0 &&
+      wrongTypes.length === 0,
+
+    missing,
+    wrongTypes,
+  };
+}
+
+function findDatabase(
+  databases,
+  definition
+) {
+  const exactTitleMatches =
+    databases.filter(
+      (database) =>
+        getDatabaseTitle(database) ===
+        definition.title
+    );
+
+  const evaluated =
+    exactTitleMatches.map(
+      (database) => ({
+        database,
+        validation: validateDatabase(
+          database,
+          definition.requiredProperties
+        ),
+      })
+    );
+
+  const validMatches =
+    evaluated.filter(
+      (item) => item.validation.valid
+    );
+
+  if (validMatches.length === 1) {
+    return {
+      status: "found",
+      database:
+        validMatches[0].database,
+      validation:
+        validMatches[0].validation,
+    };
+  }
+
+  if (validMatches.length > 1) {
+    return {
+      status: "ambiguous",
+      database: null,
+      candidates:
+        validMatches.map(
+          (item) => ({
+            id: item.database.id,
+            title:
+              getDatabaseTitle(
+                item.database
+              ),
+            url:
+              item.database.url || null,
+          })
+        ),
+    };
+  }
+
+  if (exactTitleMatches.length > 0) {
+    return {
+      status: "invalid_structure",
+      database: null,
+      candidates:
+        evaluated.map(
+          (item) => ({
+            id: item.database.id,
+            title:
+              getDatabaseTitle(
+                item.database
+              ),
+            validation:
+              item.validation,
+          })
+        ),
+    };
+  }
+
+  return {
+    status: "not_found",
+    database: null,
+  };
 }
 
 export default async function handler(
@@ -182,67 +364,173 @@ export default async function handler(
         .send("Méthode non autorisée");
     }
 
-    const connection =
-      await getConnection(req);
+    const {
+      sql,
+      connection,
+    } = await getConnection(req);
 
     const databases =
       await searchAllDatabases(
         connection.access_token
       );
 
-    const simplified = databases.map(
-      (database) => ({
-        id: database.id,
+    const detection = {};
 
-        title:
-          getPlainText(database.title) ||
-          "(Sans titre)",
+    for (
+      const [key, definition]
+      of Object.entries(
+        REQUIRED_DATABASES
+      )
+    ) {
+      detection[key] = findDatabase(
+        databases,
+        definition
+      );
+    }
 
-        url:
-          database.url || null,
+    const failures =
+      Object.entries(detection)
+        .filter(
+          ([, result]) =>
+            result.status !== "found"
+        )
+        .map(
+          ([key, result]) => ({
+            key,
+            expected_title:
+              REQUIRED_DATABASES[key].title,
+            status:
+              result.status,
+            candidates:
+              result.candidates || [],
+          })
+        );
 
-        parent:
-          database.parent || null,
+    if (failures.length > 0) {
+      return res.status(422).json({
+        ok: false,
 
-        archived:
-          Boolean(database.archived),
+        error:
+          "Installation automatique impossible : " +
+          "certaines bases sont absentes, " +
+          "ambiguës ou invalides.",
 
-        in_trash:
-          Boolean(database.in_trash),
+        diagnostic: {
+          workspace_id:
+            connection.workspace_id,
 
-        properties:
-          Object.entries(
-            database.properties || {}
-          ).map(
-            ([name, property]) => ({
-              name,
-              type:
-                property?.type || null,
-            })
-          ),
-      })
-    );
+          workspace_name:
+            connection.workspace_name ||
+            null,
+
+          database_count:
+            databases.length,
+        },
+
+        failures,
+      });
+    }
+
+    const occurrencesDb =
+      detection.occurrences.database;
+
+    const inscriptionsDb =
+      detection.inscriptions.database;
+
+    const presencesDb =
+      detection.presences.database;
+
+    const feuillesAppelDb =
+      detection.feuillesAppel.database;
+
+    await sql`
+      INSERT INTO notion_workspace_config (
+        workspace_id,
+        occurrences_db_id,
+        inscriptions_db_id,
+        presences_db_id,
+        feuilles_appel_db_id,
+        updated_at
+      )
+      VALUES (
+        ${connection.workspace_id},
+        ${occurrencesDb.id},
+        ${inscriptionsDb.id},
+        ${presencesDb.id},
+        ${feuillesAppelDb.id},
+        NOW()
+      )
+      ON CONFLICT (workspace_id)
+      DO UPDATE SET
+        occurrences_db_id =
+          EXCLUDED.occurrences_db_id,
+        inscriptions_db_id =
+          EXCLUDED.inscriptions_db_id,
+        presences_db_id =
+          EXCLUDED.presences_db_id,
+        feuilles_appel_db_id =
+          EXCLUDED.feuilles_appel_db_id,
+        updated_at = NOW()
+    `;
 
     return res.status(200).json({
       ok: true,
 
-      diagnostic: {
-        workspace_id:
+      message:
+        "Installation automatique réussie.",
+
+      workspace: {
+        id:
           connection.workspace_id,
 
-        workspace_name:
+        name:
           connection.workspace_name ||
           null,
-
-        database_count:
-          simplified.length,
       },
 
-      databases: simplified,
+      detected: {
+        occurrences: {
+          id:
+            occurrencesDb.id,
+          title:
+            getDatabaseTitle(
+              occurrencesDb
+            ),
+        },
+
+        inscriptions: {
+          id:
+            inscriptionsDb.id,
+          title:
+            getDatabaseTitle(
+              inscriptionsDb
+            ),
+        },
+
+        presences: {
+          id:
+            presencesDb.id,
+          title:
+            getDatabaseTitle(
+              presencesDb
+            ),
+        },
+
+        feuilles_appel: {
+          id:
+            feuillesAppelDb.id,
+          title:
+            getDatabaseTitle(
+              feuillesAppelDb
+            ),
+        },
+      },
+
+      saved_to_neon: true,
     });
   } catch (error) {
     console.error(
-      "Erreur setup Notion :",
+      "Erreur installation Notion :",
       error
     );
 
