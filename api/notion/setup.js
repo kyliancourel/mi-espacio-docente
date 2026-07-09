@@ -5,7 +5,16 @@ import {
   MI_ESPACIO_DOCENTE_SCHEMA_VERSION,
 } from "../../lib/mi-espacio-docente-schema.js";
 
-const NOTION_VERSION = "2022-06-28";
+import {
+  MI_ESPACIO_DOCENTE_TEMPLATES,
+  MI_ESPACIO_DOCENTE_TEMPLATES_VERSION,
+} from "../../lib/mi-espacio-docente-templates.js";
+
+const NOTION_LEGACY_VERSION =
+  "2022-06-28";
+
+const NOTION_MODERN_VERSION =
+  "2026-03-11";
 
 /*
   Installation et validation complète
@@ -22,10 +31,32 @@ const NOTION_VERSION = "2022-06-28";
   - refuse les structures invalides ;
   - autorise les propriétés supplémentaires ;
   - enregistre les 33 IDs propres au workspace ;
-  - maintient notion_workspace_config
-    pour la compatibilité avec faire-appel.js.
 
-  Aucun ID Notion n'est codé en dur.
+  Templates :
+  - charge le registre officiel versionné ;
+  - découvre les data sources modernes ;
+  - liste les templates de chaque base concernée ;
+  - identifie les templates officiels par :
+      componentKey + nom exact normalisé ;
+  - refuse un template officiel absent ;
+  - refuse un template officiel ambigu ;
+  - enregistre les IDs propres au workspace ;
+  - conserve les champs prévus pour
+    les futures empreintes et mises à jour ;
+  - renseigne automatiquement
+    feuille_template_id ;
+
+  Compatibilité :
+  - maintient notion_workspace_config
+    pour faire-appel.js.
+
+  Important :
+  - aucun ID Notion n'est codé en dur ;
+  - aucune création de template ici ;
+  - aucune mise à jour de contenu ici ;
+  - la propagation réelle sera gérée
+    par le futur moteur update.js après
+    validation des capacités d'écriture API.
 */
 
 function getCookie(req, name) {
@@ -81,13 +112,17 @@ function getDatabaseTitle(database) {
 }
 
 /*
-  Protège la détection contre :
+  Normalisation commune pour :
+  - titres de bases ;
+  - noms de templates.
+
+  Protège contre :
   - espaces insécables ;
   - caractères invisibles ;
   - variantes Unicode équivalentes ;
   - espaces multiples.
 */
-function normalizeDatabaseTitle(value) {
+function normalizeText(value) {
   return String(value || "")
     .normalize("NFKC")
     .replace(/\u00A0/g, " ")
@@ -99,8 +134,25 @@ function normalizeDatabaseTitle(value) {
     .trim();
 }
 
-async function notion(
+function normalizeDatabaseTitle(value) {
+  return normalizeText(value);
+}
+
+function normalizeTemplateName(value) {
+  return normalizeText(value);
+}
+
+/*
+  Appel API Notion générique avec
+  version explicite.
+
+  Cela permet de conserver :
+  - 2022-06-28 pour le moteur historique ;
+  - 2026-03-11 pour data sources/templates.
+*/
+async function notionWithVersion(
   accessToken,
+  notionVersion,
   path,
   options = {}
 ) {
@@ -120,7 +172,7 @@ async function notion(
         `Bearer ${accessToken}`,
 
       "Notion-Version":
-        NOTION_VERSION,
+        notionVersion,
 
       "Content-Type":
         "application/json",
@@ -154,10 +206,42 @@ async function notion(
     error.statusCode =
       response.status;
 
+    error.notionStatus =
+      response.status;
+
+    error.notionData =
+      data;
+
     throw error;
   }
 
   return data;
+}
+
+async function notionLegacy(
+  accessToken,
+  path,
+  options = {}
+) {
+  return notionWithVersion(
+    accessToken,
+    NOTION_LEGACY_VERSION,
+    path,
+    options
+  );
+}
+
+async function notionModern(
+  accessToken,
+  path,
+  options = {}
+) {
+  return notionWithVersion(
+    accessToken,
+    NOTION_MODERN_VERSION,
+    path,
+    options
+  );
 }
 
 async function getConnection(req) {
@@ -241,7 +325,7 @@ async function searchAllDatabases(
         startCursor;
     }
 
-    const result = await notion(
+    const result = await notionLegacy(
       accessToken,
       "/search",
       {
@@ -453,7 +537,8 @@ function findDatabase(
   */
   if (titleMatches.length > 0) {
     return {
-      status: "invalid_structure",
+      status:
+        "invalid_structure",
 
       database: null,
 
@@ -487,6 +572,334 @@ function findDatabase(
   };
 }
 
+/*
+  API moderne :
+  récupérer le conteneur database
+  pour découvrir ses data_sources.
+*/
+async function retrieveModernDatabase(
+  accessToken,
+  databaseId
+) {
+  return notionModern(
+    accessToken,
+    `/databases/${databaseId}`,
+    {
+      method: "GET",
+    }
+  );
+}
+
+/*
+  Liste paginée de tous les templates
+  d'une data source.
+*/
+async function listAllTemplates(
+  accessToken,
+  dataSourceId
+) {
+  const templates = [];
+
+  let startCursor;
+  let hasMore = true;
+
+  while (hasMore) {
+    const params =
+      new URLSearchParams();
+
+    params.set(
+      "page_size",
+      "100"
+    );
+
+    if (startCursor) {
+      params.set(
+        "start_cursor",
+        startCursor
+      );
+    }
+
+    const result = await notionModern(
+      accessToken,
+      (
+        `/data_sources/` +
+        `${dataSourceId}/templates?` +
+        params.toString()
+      ),
+      {
+        method: "GET",
+      }
+    );
+
+    templates.push(
+      ...(result.templates || [])
+    );
+
+    hasMore =
+      Boolean(result.has_more);
+
+    startCursor =
+      result.next_cursor ||
+      undefined;
+  }
+
+  return templates;
+}
+
+/*
+  Charge tous les templates accessibles
+  pour un composant officiel donné.
+
+  Une database moderne peut théoriquement
+  exposer plusieurs data sources.
+*/
+async function discoverComponentTemplates(
+  accessToken,
+  componentKey,
+  database
+) {
+  const modernDatabase =
+    await retrieveModernDatabase(
+      accessToken,
+      database.id
+    );
+
+  const dataSources =
+    Array.isArray(
+      modernDatabase?.data_sources
+    )
+      ? modernDatabase.data_sources
+      : [];
+
+  const discovered = [];
+
+  for (const dataSource of dataSources) {
+    const dataSourceId =
+      dataSource?.id;
+
+    if (!dataSourceId) {
+      continue;
+    }
+
+    const templates =
+      await listAllTemplates(
+        accessToken,
+        dataSourceId
+      );
+
+    for (const template of templates) {
+      discovered.push({
+        component_key:
+          componentKey,
+
+        database_id:
+          database.id,
+
+        data_source_id:
+          dataSourceId,
+
+        data_source_name:
+          dataSource?.name || null,
+
+        template_id:
+          template?.id || null,
+
+        template_name:
+          template?.name || null,
+
+        is_default:
+          Boolean(
+            template?.is_default
+          ),
+      });
+    }
+  }
+
+  return {
+    modernDatabase,
+    dataSources,
+    templates:
+      discovered,
+  };
+}
+
+/*
+  Détection stricte d'un template officiel.
+
+  Identité fonctionnelle :
+  - componentKey ;
+  - nom exact après normalisation.
+
+  Aucun ID maître n'est utilisé.
+*/
+function findOfficialTemplate(
+  discoveredTemplates,
+  definition
+) {
+  const normalizedExpectedName =
+    normalizeTemplateName(
+      definition.name
+    );
+
+  const matches =
+    discoveredTemplates.filter(
+      (template) =>
+        normalizeTemplateName(
+          template.template_name
+        ) === normalizedExpectedName
+    );
+
+  if (matches.length === 1) {
+    return {
+      status: "found",
+
+      template:
+        matches[0],
+    };
+  }
+
+  if (matches.length > 1) {
+    return {
+      status: "ambiguous",
+
+      template: null,
+
+      candidates:
+        matches,
+    };
+  }
+
+  return {
+    status: "not_found",
+
+    template: null,
+
+    candidates: [],
+  };
+}
+
+/*
+  Détecte les templates officiels
+  définis dans le registre versionné.
+
+  On ne scanne ici que les composants
+  réellement nécessaires au registre.
+*/
+async function detectOfficialTemplates(
+  accessToken,
+  detection
+) {
+  const templateEntries =
+    Object.entries(
+      MI_ESPACIO_DOCENTE_TEMPLATES
+    );
+
+  const componentKeys =
+    [
+      ...new Set(
+        templateEntries.map(
+          ([, definition]) =>
+            definition.componentKey
+        )
+      ),
+    ];
+
+  const discoveredByComponent = {};
+  const componentDiagnostics = {};
+
+  for (
+    const componentKey
+    of componentKeys
+  ) {
+    const database =
+      detection[componentKey]
+        ?.database;
+
+    if (!database) {
+      componentDiagnostics[
+        componentKey
+      ] = {
+        status:
+          "database_not_available",
+
+        database_id:
+          null,
+
+        data_source_count:
+          0,
+
+        discovered_template_count:
+          0,
+      };
+
+      discoveredByComponent[
+        componentKey
+      ] = [];
+
+      continue;
+    }
+
+    const discovery =
+      await discoverComponentTemplates(
+        accessToken,
+        componentKey,
+        database
+      );
+
+    discoveredByComponent[
+      componentKey
+    ] = discovery.templates;
+
+    componentDiagnostics[
+      componentKey
+    ] = {
+      status:
+        "scanned",
+
+      database_id:
+        database.id,
+
+      data_source_count:
+        discovery.dataSources.length,
+
+      discovered_template_count:
+        discovery.templates.length,
+    };
+  }
+
+  const templateDetection = {};
+
+  for (
+    const [templateKey, definition]
+    of templateEntries
+  ) {
+    const componentKey =
+      definition.componentKey;
+
+    const discoveredTemplates =
+      discoveredByComponent[
+        componentKey
+      ] || [];
+
+    templateDetection[
+      templateKey
+    ] = {
+      ...findOfficialTemplate(
+        discoveredTemplates,
+        definition
+      ),
+
+      definition,
+    };
+  }
+
+  return {
+    templateDetection,
+    discoveredByComponent,
+    componentDiagnostics,
+  };
+}
+
 export default async function handler(
   req,
   res
@@ -510,9 +923,19 @@ export default async function handler(
       connection,
     } = await getConnection(req);
 
+    const accessToken =
+      connection.access_token;
+
+    /*
+      ==================================================
+      PHASE 1
+      Validation des 33 bases officielles
+      ==================================================
+    */
+
     const databases =
       await searchAllDatabases(
-        connection.access_token
+        accessToken
       );
 
     const schemaEntries =
@@ -522,10 +945,6 @@ export default async function handler(
 
     const detection = {};
 
-    /*
-      Validation des 33 composants
-      directement avec le schéma 1.0.0.
-    */
     for (
       const [componentKey, definition]
       of schemaEntries
@@ -599,6 +1018,9 @@ export default async function handler(
           schema_version:
             MI_ESPACIO_DOCENTE_SCHEMA_VERSION,
 
+          templates_version:
+            MI_ESPACIO_DOCENTE_TEMPLATES_VERSION,
+
           diagnostic: {
             workspace_id:
               connection.workspace_id,
@@ -641,9 +1063,182 @@ export default async function handler(
 
     /*
       À ce stade :
-      les 33 bases existent,
-      sont non ambiguës,
-      et respectent toutes le schéma.
+      - 33 bases présentes ;
+      - aucune ambiguïté ;
+      - structures conformes.
+    */
+
+    /*
+      ==================================================
+      PHASE 2
+      Détection des templates officiels
+      ==================================================
+    */
+
+    const {
+      templateDetection,
+      componentDiagnostics,
+    } = await detectOfficialTemplates(
+      accessToken,
+      detection
+    );
+
+    const templateFailures =
+      Object.entries(
+        templateDetection
+      )
+        .filter(
+          ([, result]) =>
+            result.status !== "found"
+        )
+        .map(
+          ([templateKey, result]) => ({
+            template_key:
+              templateKey,
+
+            component_key:
+              result.definition
+                .componentKey,
+
+            expected_name:
+              result.definition.name,
+
+            expected_version:
+              result.definition.version,
+
+            status:
+              result.status,
+
+            candidates:
+              result.candidates || [],
+          })
+        );
+
+    /*
+      Important :
+      aucune écriture Neon si un template
+      officiel requis est absent ou ambigu.
+
+      Pour l'instant setup.js est strict
+      pour une installation nouvelle.
+
+      Le futur update.js gérera les états :
+      - missing ;
+      - outdated ;
+      - locally_modified ;
+      - conflict.
+    */
+    if (templateFailures.length > 0) {
+      const templateStatusCounts = {
+        not_found: 0,
+        ambiguous: 0,
+      };
+
+      for (
+        const failure
+        of templateFailures
+      ) {
+        if (
+          Object.prototype.hasOwnProperty.call(
+            templateStatusCounts,
+            failure.status
+          )
+        ) {
+          templateStatusCounts[
+            failure.status
+          ] += 1;
+        }
+      }
+
+      return res
+        .status(422)
+        .json({
+          ok: false,
+
+          error:
+            "Installation automatique impossible : " +
+            "un ou plusieurs templates officiels " +
+            "de Mi Espacio Docente sont absents " +
+            "ou ambigus.",
+
+          schema_version:
+            MI_ESPACIO_DOCENTE_SCHEMA_VERSION,
+
+          templates_version:
+            MI_ESPACIO_DOCENTE_TEMPLATES_VERSION,
+
+          workspace: {
+            id:
+              connection.workspace_id,
+
+            name:
+              connection.workspace_name ||
+              null,
+          },
+
+          database_validation: {
+            expected:
+              schemaEntries.length,
+
+            detected:
+              schemaEntries.length,
+
+            structurally_valid:
+              schemaEntries.length,
+          },
+
+          template_diagnostic: {
+            expected_template_count:
+              Object.keys(
+                MI_ESPACIO_DOCENTE_TEMPLATES
+              ).length,
+
+            detected_template_count:
+              Object.values(
+                templateDetection
+              )
+                .filter(
+                  (result) =>
+                    result.status ===
+                    "found"
+                )
+                .length,
+
+            failure_count:
+              templateFailures.length,
+
+            not_found_count:
+              templateStatusCounts
+                .not_found,
+
+            ambiguous_count:
+              templateStatusCounts
+                .ambiguous,
+          },
+
+          component_diagnostics:
+            componentDiagnostics,
+
+          failures:
+            templateFailures,
+
+          saved_to_neon:
+            false,
+        });
+    }
+
+    /*
+      À ce stade :
+      - 33 bases conformes ;
+      - 5 templates officiels détectés ;
+      - aucune ambiguïté.
+    */
+
+    /*
+      ==================================================
+      PHASE 3
+      Enregistrement des 33 composants
+      ==================================================
     */
 
     for (
@@ -689,11 +1284,177 @@ export default async function handler(
     }
 
     /*
-      Compatibilité avec faire-appel.js.
+      ==================================================
+      PHASE 4
+      Enregistrement des templates officiels
+      ==================================================
 
-      On continue temporairement à remplir
-      notion_workspace_config.
+      Règle importante :
+      - première installation :
+          installed_version = version officielle
+          sync_status = current
+
+      - relance ultérieure :
+          on met à jour les métadonnées Notion
+          et la version officielle ;
+
+          on ne réinitialise pas aveuglément
+          un éventuel état :
+          locally_modified / conflict / outdated.
+
+      Cela prépare le futur update.js.
     */
+
+    for (
+      const [templateKey, result]
+      of Object.entries(
+        templateDetection
+      )
+    ) {
+      const definition =
+        result.definition;
+
+      const template =
+        result.template;
+
+      await sql`
+        INSERT INTO notion_workspace_templates (
+          workspace_id,
+          template_key,
+          component_key,
+          notion_template_id,
+          notion_data_source_id,
+          notion_template_name,
+          official_version,
+          installed_version,
+          official_fingerprint,
+          local_fingerprint,
+          sync_status,
+          is_default,
+          locally_modified,
+          conflict_detected,
+          last_detected_at,
+          last_synced_at,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          ${connection.workspace_id},
+          ${templateKey},
+          ${definition.componentKey},
+          ${template.template_id},
+          ${template.data_source_id},
+          ${template.template_name},
+          ${definition.version},
+          ${definition.version},
+          ${null},
+          ${null},
+          ${"current"},
+          ${template.is_default},
+          ${false},
+          ${false},
+          NOW(),
+          NOW(),
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT (
+          workspace_id,
+          template_key
+        )
+        DO UPDATE SET
+          component_key =
+            EXCLUDED.component_key,
+
+          notion_template_id =
+            EXCLUDED.notion_template_id,
+
+          notion_data_source_id =
+            EXCLUDED.notion_data_source_id,
+
+          notion_template_name =
+            EXCLUDED.notion_template_name,
+
+          official_version =
+            EXCLUDED.official_version,
+
+          is_default =
+            EXCLUDED.is_default,
+
+          last_detected_at =
+            NOW(),
+
+          updated_at =
+            NOW(),
+
+          installed_version =
+            CASE
+              WHEN
+                notion_workspace_templates
+                  .installed_version
+                IS NULL
+              THEN
+                EXCLUDED.installed_version
+              ELSE
+                notion_workspace_templates
+                  .installed_version
+            END,
+
+          sync_status =
+            CASE
+              WHEN
+                notion_workspace_templates
+                  .sync_status
+                IN (
+                  'locally_modified',
+                  'conflict',
+                  'outdated'
+                )
+              THEN
+                notion_workspace_templates
+                  .sync_status
+
+              WHEN
+                notion_workspace_templates
+                  .installed_version
+                IS DISTINCT FROM
+                EXCLUDED.official_version
+              THEN
+                'outdated'
+
+              ELSE
+                'current'
+            END,
+
+          locally_modified =
+            notion_workspace_templates
+              .locally_modified,
+
+          conflict_detected =
+            notion_workspace_templates
+              .conflict_detected,
+
+          official_fingerprint =
+            notion_workspace_templates
+              .official_fingerprint,
+
+          local_fingerprint =
+            notion_workspace_templates
+              .local_fingerprint,
+
+          last_synced_at =
+            notion_workspace_templates
+              .last_synced_at
+      `;
+    }
+
+    /*
+      ==================================================
+      PHASE 5
+      Compatibilité faire-appel.js
+      ==================================================
+    */
+
     const occurrencesDb =
       detection.occurrences.database;
 
@@ -706,6 +1467,33 @@ export default async function handler(
     const feuillesAppelDb =
       detection.feuilles_appel.database;
 
+    const attendanceTemplate =
+      templateDetection
+        .attendance_sheet
+        ?.template;
+
+    if (
+      !attendanceTemplate ||
+      !attendanceTemplate.template_id
+    ) {
+      const error = new Error(
+        "Le template officiel " +
+        "« attendance_sheet » est introuvable " +
+        "après validation."
+      );
+
+      error.statusCode = 500;
+
+      throw error;
+    }
+
+    /*
+      Désormais feuille_template_id
+      est propre au workspace connecté.
+
+      Plus aucun ID personnel n'est
+      nécessaire dans faire-appel.js.
+    */
     await sql`
       INSERT INTO notion_workspace_config (
         workspace_id,
@@ -713,6 +1501,7 @@ export default async function handler(
         inscriptions_db_id,
         presences_db_id,
         feuilles_appel_db_id,
+        feuille_template_id,
         updated_at
       )
       VALUES (
@@ -721,20 +1510,36 @@ export default async function handler(
         ${inscriptionsDb.id},
         ${presencesDb.id},
         ${feuillesAppelDb.id},
+        ${attendanceTemplate.template_id},
         NOW()
       )
       ON CONFLICT (workspace_id)
       DO UPDATE SET
         occurrences_db_id =
           EXCLUDED.occurrences_db_id,
+
         inscriptions_db_id =
           EXCLUDED.inscriptions_db_id,
+
         presences_db_id =
           EXCLUDED.presences_db_id,
+
         feuilles_appel_db_id =
           EXCLUDED.feuilles_appel_db_id,
-        updated_at = NOW()
+
+        feuille_template_id =
+          EXCLUDED.feuille_template_id,
+
+        updated_at =
+          NOW()
     `;
+
+    /*
+      ==================================================
+      PHASE 6
+      Construction du diagnostic final
+      ==================================================
+    */
 
     const detected = {};
 
@@ -772,17 +1577,80 @@ export default async function handler(
       };
     }
 
+    const detectedTemplates = {};
+
+    for (
+      const [templateKey, result]
+      of Object.entries(
+        templateDetection
+      )
+    ) {
+      const definition =
+        result.definition;
+
+      const template =
+        result.template;
+
+      detectedTemplates[
+        templateKey
+      ] = {
+        component_key:
+          definition.componentKey,
+
+        name:
+          template.template_name,
+
+        notion_template_id:
+          template.template_id,
+
+        notion_data_source_id:
+          template.data_source_id,
+
+        official_version:
+          definition.version,
+
+        installed_version:
+          definition.version,
+
+        sync_status:
+          "current",
+
+        is_default:
+          template.is_default,
+
+        propagation_policy:
+          definition.propagation ||
+          null,
+
+        local_changes_policy:
+          definition.localChangesPolicy ||
+          null,
+      };
+    }
+
     return res
       .status(200)
       .json({
         ok: true,
 
         message:
-          "Installation complète et validation " +
-          "structurelle de Mi Espacio Docente réussies.",
+          "Installation complète, validation " +
+          "structurelle et détection des templates " +
+          "officiels de Mi Espacio Docente réussies.",
 
         schema_version:
           MI_ESPACIO_DOCENTE_SCHEMA_VERSION,
+
+        templates_version:
+          MI_ESPACIO_DOCENTE_TEMPLATES_VERSION,
+
+        notion_api_versions: {
+          databases:
+            NOTION_LEGACY_VERSION,
+
+          templates:
+            NOTION_MODERN_VERSION,
+        },
 
         workspace: {
           id:
@@ -794,15 +1662,15 @@ export default async function handler(
         },
 
         summary: {
-          expected:
+          expected_databases:
             schemaEntries.length,
 
-          detected:
+          detected_databases:
             Object.keys(
               detected
             ).length,
 
-          structurally_valid:
+          structurally_valid_databases:
             Object.keys(
               detected
             ).length,
@@ -815,11 +1683,67 @@ export default async function handler(
           extra_properties_allowed:
             extraPropertyCount,
 
+          expected_official_templates:
+            Object.keys(
+              MI_ESPACIO_DOCENTE_TEMPLATES
+            ).length,
+
+          detected_official_templates:
+            Object.keys(
+              detectedTemplates
+            ).length,
+
+          saved_official_templates:
+            Object.keys(
+              detectedTemplates
+            ).length,
+
+          attendance_template_configured:
+            Boolean(
+              attendanceTemplate
+                .template_id
+            ),
+
           legacy_config_updated:
             true,
         },
 
         detected,
+
+        templates:
+          detectedTemplates,
+
+        template_component_diagnostics:
+          componentDiagnostics,
+
+        future_update_engine: {
+          registry_ready:
+            true,
+
+          workspace_tracking_ready:
+            true,
+
+          version_tracking_ready:
+            true,
+
+          fingerprint_tracking_ready:
+            false,
+
+          creation_propagation_enabled:
+            false,
+
+          update_propagation_enabled:
+            false,
+
+          local_change_protection_ready:
+            true,
+
+          note:
+            "La création et la mise à jour " +
+            "automatiques des objets template " +
+            "restent désactivées jusqu'à validation " +
+            "du prototype réel d'écriture API.",
+        },
 
         saved_to_neon:
           true,
