@@ -1,194 +1,57 @@
 import { neon } from "@neondatabase/serverless";
 
+import {
+  MI_ESPACIO_DOCENTE_SCHEMA,
+  MI_ESPACIO_DOCENTE_SCHEMA_VERSION,
+} from "../../lib/mi-espacio-docente-schema.js";
+
 const NOTION_VERSION = "2022-06-28";
 
 /*
-  Les 33 bases officielles de Mi Espacio Docente.
+  Installation et validation complète
+  de Mi Espacio Docente.
 
-  - Les 4 bases déjà connues conservent une validation
-    stricte de leurs propriétés.
-  - Les 29 autres sont détectées par titre exact.
-  - Aucun ID Notion n'est codé en dur.
+  Cet endpoint :
+  - charge le schéma officiel versionné ;
+  - cherche les 33 bases attendues ;
+  - normalise les titres avant comparaison ;
+  - vérifie toutes les propriétés obligatoires ;
+  - vérifie le type exact de chaque propriété ;
+  - refuse les bases absentes ;
+  - refuse les doublons ambigus ;
+  - refuse les structures invalides ;
+  - autorise les propriétés supplémentaires ;
+  - enregistre les 33 IDs propres au workspace ;
+  - maintient notion_workspace_config
+    pour la compatibilité avec faire-appel.js.
+
+  Aucun ID Notion n'est codé en dur.
 */
 
-const REQUIRED_DATABASES = {
-  anneesScolaires: {
-    title: "📅 DB — Années scolaires",
-  },
-
-  classes: {
-    title: "🎓 DB — Classes",
-  },
-
-  eleves: {
-    title: "👨‍🎓 DB — Élèves",
-  },
-
-  besoinsParticuliers: {
-    title: "🧩 DB — Besoins particuliers",
-  },
-
-  adaptations: {
-    title: "🧰 DB — Adaptations",
-  },
-
-  incidents: {
-    title: "⚠️ DB — Incidents",
-  },
-
-  remediations: {
-    title: "🛠️ DB — Remédiations",
-  },
-
-  journalClasse: {
-    title: "📦 DB — Journal de classe",
-  },
-
-  devoirs: {
-    title: "📝 DB — Devoirs",
-  },
-
-  sequences: {
-    title: "📚 DB — Séquences",
-  },
-
-  seances: {
-    title: "🧩 DB — Séances",
-  },
-
-  suiviOral: {
-    title: "🗣️ DB — Suivi oral",
-  },
-
-  evaluations: {
-    title: "📝 DB — Évaluations",
-  },
-
-  resultats: {
-    title: "📈 DB — Résultats",
-  },
-
-  competences: {
-    title: "🎯 DB — Compétences",
-  },
-
-  maitriseCompetences: {
-    title: "📊 DB — Maîtrise des compétences",
-  },
-
-  ressources: {
-    title: "📄 DB — Ressources",
-  },
-
-  observationsPedagogiques: {
-    title: "📊 DB — Observations pédagogiques",
-  },
-
-  objectifsIndividuels: {
-    title: "🎯 DB — Objectifs individuels",
-  },
-
-  etablissements: {
-    title: "🏫 DB — Établissements",
-  },
-
-  emploiDuTemps: {
-    title: "🎓 DB — Emploi du temps",
-  },
-
-  rdvParents: {
-    title: "👥 DB — RDV Parents",
-  },
-
-  rdvParentsProfs: {
-    title: "🏫 DB — RDV Parents-Profs",
-  },
-
-  sessionsParentsProfs: {
-    title: "📅 DB — Sessions Parents-Profs",
-  },
-
-  agendaEnseignant: {
-    title: "📅 DB — Agenda enseignant",
-  },
-
-  periodesScolaires: {
-    title: "📅 DB — Périodes scolaires",
-  },
-
-  occurrences: {
-    title: "📆 DB — Occurrences de cours",
-
-    requiredProperties: {
-      "📆 Cours prévu": "title",
-      "📅 Date et heure": "date",
-      "🏁 Fin": "date",
-      "🎓 Classe": "relation",
-      "📋 Feuilles d’appel": "relation",
-    },
-  },
-
-  tachesProfesseur: {
-    title: "📌 DB - Tâches professeur",
-  },
-
-  bilansClasse: {
-    title: "📊 DB — Bilans de classe",
-  },
-
-  inscriptions: {
-    title: "🎒 DB — Inscriptions élèves",
-
-    requiredProperties: {
-      "🎒 Inscription": "title",
-      "🎓 Classe": "relation",
-      "👨‍🎓 Élève": "relation",
-      "👤 Présences": "relation",
-    },
-  },
-
-  suiviQuotidien: {
-    title: "📋 DB — Suivi quotidien",
-  },
-
-  feuillesAppel: {
-    title: "📝 DB — Feuilles d’appel",
-
-    requiredProperties: {
-      "📝 Entrée d’appel": "title",
-      "🎓 Classe": "relation",
-      "👤 Présences": "relation",
-      "📅 Occurrence de cours": "relation",
-      "📅 Date et heure de l’appel": "date",
-    },
-  },
-
-  presences: {
-    title: "👤 DB — Présences",
-
-    requiredProperties: {
-      "👤 Entrée de présence": "title",
-      "🎒 Inscription élève": "relation",
-      "✅ Statut de présence": "select",
-      "📋 Feuille d’appel": "relation",
-    },
-  },
-};
-
 function getCookie(req, name) {
-  const cookieHeader = req.headers.cookie || "";
+  const cookieHeader =
+    req.headers.cookie || "";
 
   const cookies = cookieHeader
     .split(";")
     .map((cookie) => cookie.trim());
 
   for (const cookie of cookies) {
-    const separatorIndex = cookie.indexOf("=");
+    const separatorIndex =
+      cookie.indexOf("=");
 
-    if (separatorIndex === -1) continue;
+    if (separatorIndex === -1) {
+      continue;
+    }
 
-    const key = cookie.slice(0, separatorIndex);
-    const value = cookie.slice(separatorIndex + 1);
+    const key = cookie.slice(
+      0,
+      separatorIndex
+    );
+
+    const value = cookie.slice(
+      separatorIndex + 1
+    );
 
     if (key === name) {
       return decodeURIComponent(value);
@@ -200,8 +63,39 @@ function getCookie(req, name) {
 
 function getPlainText(items = []) {
   return items
-    .map((item) => item?.plain_text || "")
+    .map(
+      (item) =>
+        item?.plain_text || ""
+    )
     .join("")
+    .trim();
+}
+
+function getDatabaseTitle(database) {
+  return (
+    getPlainText(
+      database?.title || []
+    ) ||
+    "(Sans titre)"
+  );
+}
+
+/*
+  Protège la détection contre :
+  - espaces insécables ;
+  - caractères invisibles ;
+  - variantes Unicode équivalentes ;
+  - espaces multiples.
+*/
+function normalizeDatabaseTitle(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\u00A0/g, " ")
+    .replace(
+      /[\u200B-\u200D\uFEFF]/g,
+      ""
+    )
+    .replace(/\s+/g, " ")
     .trim();
 }
 
@@ -210,9 +104,10 @@ async function notion(
   path,
   options = {}
 ) {
-  const cleanPath = path.startsWith("/")
-    ? path
-    : `/${path}`;
+  const cleanPath =
+    path.startsWith("/")
+      ? path
+      : `/${path}`;
 
   const url =
     `https://api.notion.com/v1${cleanPath}`;
@@ -221,19 +116,28 @@ async function notion(
     ...options,
 
     headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Notion-Version": NOTION_VERSION,
-      "Content-Type": "application/json",
+      Authorization:
+        `Bearer ${accessToken}`,
+
+      "Notion-Version":
+        NOTION_VERSION,
+
+      "Content-Type":
+        "application/json",
+
       ...(options.headers || {}),
     },
   });
 
-  const text = await response.text();
+  const text =
+    await response.text();
 
   let data;
 
   try {
-    data = text ? JSON.parse(text) : {};
+    data = text
+      ? JSON.parse(text)
+      : {};
   } catch {
     data = {
       raw: text,
@@ -242,11 +146,13 @@ async function notion(
 
   if (!response.ok) {
     const error = new Error(
-      `Notion ${response.status} sur ${url}: ` +
+      `Notion ${response.status} ` +
+      `sur ${url}: ` +
       `${JSON.stringify(data)}`
     );
 
-    error.statusCode = response.status;
+    error.statusCode =
+      response.status;
 
     throw error;
   }
@@ -255,7 +161,8 @@ async function notion(
 }
 
 async function getConnection(req) {
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl =
+    process.env.DATABASE_URL;
 
   if (!databaseUrl) {
     throw new Error(
@@ -292,7 +199,10 @@ async function getConnection(req) {
 
   const connection = rows[0];
 
-  if (!connection || !connection.access_token) {
+  if (
+    !connection ||
+    !connection.access_token
+  ) {
     const error = new Error(
       "Connexion Notion introuvable ou expirée."
     );
@@ -308,7 +218,9 @@ async function getConnection(req) {
   };
 }
 
-async function searchAllDatabases(accessToken) {
+async function searchAllDatabases(
+  accessToken
+) {
   const databases = [];
 
   let startCursor;
@@ -325,7 +237,8 @@ async function searchAllDatabases(accessToken) {
     };
 
     if (startCursor) {
-      body.start_cursor = startCursor;
+      body.start_cursor =
+        startCursor;
     }
 
     const result = await notion(
@@ -333,6 +246,7 @@ async function searchAllDatabases(accessToken) {
       "/search",
       {
         method: "POST",
+
         body: JSON.stringify(body),
       }
     );
@@ -341,40 +255,28 @@ async function searchAllDatabases(accessToken) {
       ...(result.results || [])
     );
 
-    hasMore = Boolean(result.has_more);
+    hasMore =
+      Boolean(result.has_more);
 
     startCursor =
-      result.next_cursor || undefined;
+      result.next_cursor ||
+      undefined;
   }
 
   return databases;
 }
 
-function getDatabaseTitle(database) {
-  return (
-    getPlainText(database?.title || []) ||
-    "(Sans titre)"
-  );
-}
+/*
+  Validation stricte du contrat officiel.
 
+  Les propriétés supplémentaires sont
+  autorisées et ne bloquent pas
+  l'installation.
+*/
 function validateDatabase(
   database,
-  requiredProperties = null
+  requiredProperties = {}
 ) {
-  /*
-    Si aucune structure n'est encore connue,
-    le titre exact suffit pour cette première
-    version d'installation.
-  */
-
-  if (!requiredProperties) {
-    return {
-      valid: true,
-      missing: [],
-      wrongTypes: [],
-    };
-  }
-
   const actualProperties =
     database?.properties || {};
 
@@ -383,25 +285,66 @@ function validateDatabase(
 
   for (
     const [propertyName, expectedType]
-    of Object.entries(requiredProperties)
+    of Object.entries(
+      requiredProperties
+    )
   ) {
     const actualProperty =
       actualProperties[propertyName];
 
     if (!actualProperty) {
-      missing.push(propertyName);
+      missing.push({
+        property:
+          propertyName,
+
+        expected_type:
+          expectedType,
+      });
+
       continue;
     }
 
-    if (actualProperty.type !== expectedType) {
+    const actualType =
+      actualProperty.type || null;
+
+    if (actualType !== expectedType) {
       wrongTypes.push({
-        property: propertyName,
-        expected: expectedType,
+        property:
+          propertyName,
+
+        expected:
+          expectedType,
+
         actual:
-          actualProperty.type || null,
+          actualType,
       });
     }
   }
+
+  const requiredPropertyNames =
+    new Set(
+      Object.keys(
+        requiredProperties
+      )
+    );
+
+  const extraProperties =
+    Object.entries(actualProperties)
+      .filter(
+        ([propertyName]) =>
+          !requiredPropertyNames.has(
+            propertyName
+          )
+      )
+      .map(
+        ([propertyName, property]) => ({
+          property:
+            propertyName,
+
+          type:
+            property?.type || null,
+        })
+      );
 
   return {
     valid:
@@ -409,7 +352,14 @@ function validateDatabase(
       wrongTypes.length === 0,
 
     missing,
+
     wrongTypes,
+
+    /*
+      Informatif uniquement.
+      Ne bloque jamais l'installation.
+    */
+    extraProperties,
   };
 }
 
@@ -417,30 +367,43 @@ function findDatabase(
   databases,
   definition
 ) {
-  const exactTitleMatches =
+  const normalizedExpectedTitle =
+    normalizeDatabaseTitle(
+      definition.title
+    );
+
+  const titleMatches =
     databases.filter(
       (database) =>
-        getDatabaseTitle(database) ===
-        definition.title
+        normalizeDatabaseTitle(
+          getDatabaseTitle(database)
+        ) === normalizedExpectedTitle
     );
 
   const evaluated =
-    exactTitleMatches.map(
+    titleMatches.map(
       (database) => ({
         database,
 
-        validation: validateDatabase(
-          database,
-          definition.requiredProperties
-        ),
+        validation:
+          validateDatabase(
+            database,
+            definition.requiredProperties ||
+              {}
+          ),
       })
     );
 
   const validMatches =
     evaluated.filter(
-      (item) => item.validation.valid
+      (item) =>
+        item.validation.valid
     );
 
+  /*
+    Une seule base :
+    titre correct + structure correcte.
+  */
   if (validMatches.length === 1) {
     return {
       status: "found",
@@ -453,15 +416,21 @@ function findDatabase(
     };
   }
 
+  /*
+    Plusieurs bases entièrement valides :
+    impossible de savoir laquelle utiliser.
+  */
   if (validMatches.length > 1) {
     return {
       status: "ambiguous",
+
       database: null,
 
       candidates:
         validMatches.map(
           (item) => ({
-            id: item.database.id,
+            id:
+              item.database.id,
 
             title:
               getDatabaseTitle(
@@ -470,25 +439,37 @@ function findDatabase(
 
             url:
               item.database.url || null,
+
+            validation:
+              item.validation,
           })
         ),
     };
   }
 
-  if (exactTitleMatches.length > 0) {
+  /*
+    Le titre existe, mais aucune base
+    correspondante n'a une structure valide.
+  */
+  if (titleMatches.length > 0) {
     return {
       status: "invalid_structure",
+
       database: null,
 
       candidates:
         evaluated.map(
           (item) => ({
-            id: item.database.id,
+            id:
+              item.database.id,
 
             title:
               getDatabaseTitle(
                 item.database
               ),
+
+            url:
+              item.database.url || null,
 
             validation:
               item.validation,
@@ -499,52 +480,11 @@ function findDatabase(
 
   return {
     status: "not_found",
+
     database: null,
-  };
-}
 
-function toComponentKey(key) {
-  const mapping = {
-    anneesScolaires: "annees_scolaires",
-    classes: "classes",
-    eleves: "eleves",
-    besoinsParticuliers: "besoins_particuliers",
-    adaptations: "adaptations",
-    incidents: "incidents",
-    remediations: "remediations",
-    journalClasse: "journal_classe",
-    devoirs: "devoirs",
-    sequences: "sequences",
-    seances: "seances",
-    suiviOral: "suivi_oral",
-    evaluations: "evaluations",
-    resultats: "resultats",
-    competences: "competences",
-    maitriseCompetences:
-      "maitrise_competences",
-    ressources: "ressources",
-    observationsPedagogiques:
-      "observations_pedagogiques",
-    objectifsIndividuels:
-      "objectifs_individuels",
-    etablissements: "etablissements",
-    emploiDuTemps: "emploi_du_temps",
-    rdvParents: "rdv_parents",
-    rdvParentsProfs: "rdv_parents_profs",
-    sessionsParentsProfs:
-      "sessions_parents_profs",
-    agendaEnseignant: "agenda_enseignant",
-    periodesScolaires: "periodes_scolaires",
-    occurrences: "occurrences",
-    tachesProfesseur: "taches_professeur",
-    bilansClasse: "bilans_classe",
-    inscriptions: "inscriptions",
-    suiviQuotidien: "suivi_quotidien",
-    feuillesAppel: "feuilles_appel",
-    presences: "presences",
+    candidates: [],
   };
-
-  return mapping[key] || key;
 }
 
 export default async function handler(
@@ -553,11 +493,16 @@ export default async function handler(
 ) {
   try {
     if (req.method !== "GET") {
-      res.setHeader("Allow", "GET");
+      res.setHeader(
+        "Allow",
+        "GET"
+      );
 
       return res
         .status(405)
-        .send("Méthode non autorisée");
+        .send(
+          "Méthode non autorisée"
+        );
     }
 
     const {
@@ -570,18 +515,26 @@ export default async function handler(
         connection.access_token
       );
 
+    const schemaEntries =
+      Object.entries(
+        MI_ESPACIO_DOCENTE_SCHEMA
+      );
+
     const detection = {};
 
+    /*
+      Validation des 33 composants
+      directement avec le schéma 1.0.0.
+    */
     for (
-      const [key, definition]
-      of Object.entries(
-        REQUIRED_DATABASES
-      )
+      const [componentKey, definition]
+      of schemaEntries
     ) {
-      detection[key] = findDatabase(
-        databases,
-        definition
-      );
+      detection[componentKey] =
+        findDatabase(
+          databases,
+          definition
+        );
     }
 
     const failures =
@@ -591,14 +544,14 @@ export default async function handler(
             result.status !== "found"
         )
         .map(
-          ([key, result]) => ({
-            key,
-
+          ([componentKey, result]) => ({
             component_key:
-              toComponentKey(key),
+              componentKey,
 
             expected_title:
-              REQUIRED_DATABASES[key].title,
+              MI_ESPACIO_DOCENTE_SCHEMA[
+                componentKey
+              ].title,
 
             status:
               result.status,
@@ -608,60 +561,97 @@ export default async function handler(
           })
         );
 
+    /*
+      Aucune écriture Neon si une seule
+      base échoue à la validation.
+    */
     if (failures.length > 0) {
-      return res.status(422).json({
-        ok: false,
+      const statusCounts = {
+        not_found: 0,
+        ambiguous: 0,
+        invalid_structure: 0,
+      };
 
-        error:
-          "Installation automatique impossible : " +
-          "certaines bases sont absentes, " +
-          "ambiguës ou invalides.",
+      for (const failure of failures) {
+        if (
+          Object.prototype.hasOwnProperty.call(
+            statusCounts,
+            failure.status
+          )
+        ) {
+          statusCounts[
+            failure.status
+          ] += 1;
+        }
+      }
 
-        diagnostic: {
-          workspace_id:
-            connection.workspace_id,
+      return res
+        .status(422)
+        .json({
+          ok: false,
 
-          workspace_name:
-            connection.workspace_name ||
-            null,
+          error:
+            "Installation automatique impossible : " +
+            "le template Notion ne respecte pas " +
+            "le schéma officiel de " +
+            "Mi Espacio Docente.",
 
-          database_count:
-            databases.length,
+          schema_version:
+            MI_ESPACIO_DOCENTE_SCHEMA_VERSION,
 
-          expected_database_count:
-            Object.keys(
-              REQUIRED_DATABASES
-            ).length,
+          diagnostic: {
+            workspace_id:
+              connection.workspace_id,
 
-          detected_database_count:
-            Object.values(detection)
-              .filter(
-                (result) =>
-                  result.status === "found"
-              )
-              .length,
-        },
+            workspace_name:
+              connection.workspace_name ||
+              null,
 
-        failures,
-      });
+            accessible_database_count:
+              databases.length,
+
+            expected_database_count:
+              schemaEntries.length,
+
+            detected_database_count:
+              Object.values(detection)
+                .filter(
+                  (result) =>
+                    result.status ===
+                    "found"
+                )
+                .length,
+
+            failure_count:
+              failures.length,
+
+            not_found_count:
+              statusCounts.not_found,
+
+            ambiguous_count:
+              statusCounts.ambiguous,
+
+            invalid_structure_count:
+              statusCounts.invalid_structure,
+          },
+
+          failures,
+        });
     }
 
     /*
-      Enregistrement des 33 composants.
-
-      Une ligne par base :
-      workspace_id + component_key
+      À ce stade :
+      les 33 bases existent,
+      sont non ambiguës,
+      et respectent toutes le schéma.
     */
 
     for (
-      const [key, result]
+      const [componentKey, result]
       of Object.entries(detection)
     ) {
       const database =
         result.database;
-
-      const componentKey =
-        toComponentKey(key);
 
       const title =
         getDatabaseTitle(database);
@@ -699,14 +689,11 @@ export default async function handler(
     }
 
     /*
-      Compatibilité avec le système actuel.
+      Compatibilité avec faire-appel.js.
 
-      On continue à remplir
-      notion_workspace_config
-      pour que faire-appel.js
-      puisse être migré progressivement.
+      On continue temporairement à remplir
+      notion_workspace_config.
     */
-
     const occurrencesDb =
       detection.occurrences.database;
 
@@ -717,7 +704,7 @@ export default async function handler(
       detection.presences.database;
 
     const feuillesAppelDb =
-      detection.feuillesAppel.database;
+      detection.feuilles_appel.database;
 
     await sql`
       INSERT INTO notion_workspace_config (
@@ -751,13 +738,20 @@ export default async function handler(
 
     const detected = {};
 
+    let extraPropertyCount = 0;
+
     for (
-      const [key, result]
+      const [componentKey, result]
       of Object.entries(detection)
     ) {
-      detected[
-        toComponentKey(key)
-      ] = {
+      const extras =
+        result.validation
+          ?.extraProperties || [];
+
+      extraPropertyCount +=
+        extras.length;
+
+      detected[componentKey] = {
         id:
           result.database.id,
 
@@ -765,39 +759,71 @@ export default async function handler(
           getDatabaseTitle(
             result.database
           ),
+
+        required_property_count:
+          Object.keys(
+            MI_ESPACIO_DOCENTE_SCHEMA[
+              componentKey
+            ].requiredProperties || {}
+          ).length,
+
+        extra_property_count:
+          extras.length,
       };
     }
 
-    return res.status(200).json({
-      ok: true,
+    return res
+      .status(200)
+      .json({
+        ok: true,
 
-      message:
-        "Installation complète de Mi Espacio Docente réussie.",
+        message:
+          "Installation complète et validation " +
+          "structurelle de Mi Espacio Docente réussies.",
 
-      workspace: {
-        id:
-          connection.workspace_id,
+        schema_version:
+          MI_ESPACIO_DOCENTE_SCHEMA_VERSION,
 
-        name:
-          connection.workspace_name ||
-          null,
-      },
+        workspace: {
+          id:
+            connection.workspace_id,
 
-      summary: {
-        expected: 33,
-        detected:
-          Object.keys(detected).length,
+          name:
+            connection.workspace_name ||
+            null,
+        },
 
-        saved_components:
-          Object.keys(detected).length,
+        summary: {
+          expected:
+            schemaEntries.length,
 
-        legacy_config_updated: true,
-      },
+          detected:
+            Object.keys(
+              detected
+            ).length,
 
-      detected,
+          structurally_valid:
+            Object.keys(
+              detected
+            ).length,
 
-      saved_to_neon: true,
-    });
+          saved_components:
+            Object.keys(
+              detected
+            ).length,
+
+          extra_properties_allowed:
+            extraPropertyCount,
+
+          legacy_config_updated:
+            true,
+        },
+
+        detected,
+
+        saved_to_neon:
+          true,
+      });
   } catch (error) {
     console.error(
       "Erreur installation Notion :",
