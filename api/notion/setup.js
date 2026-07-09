@@ -2,9 +2,123 @@ import { neon } from "@neondatabase/serverless";
 
 const NOTION_VERSION = "2022-06-28";
 
+/*
+  Les 33 bases officielles de Mi Espacio Docente.
+
+  - Les 4 bases déjà connues conservent une validation
+    stricte de leurs propriétés.
+  - Les 29 autres sont détectées par titre exact.
+  - Aucun ID Notion n'est codé en dur.
+*/
+
 const REQUIRED_DATABASES = {
+  anneesScolaires: {
+    title: "📅 DB — Années scolaires",
+  },
+
+  classes: {
+    title: "🎓 DB — Classes",
+  },
+
+  eleves: {
+    title: "👨‍🎓 DB — Élèves",
+  },
+
+  besoinsParticuliers: {
+    title: "🧩 DB — Besoins particuliers",
+  },
+
+  adaptations: {
+    title: "🧰 DB — Adaptations",
+  },
+
+  incidents: {
+    title: "⚠️ DB — Incidents",
+  },
+
+  remediations: {
+    title: "🛠️ DB — Remédiations",
+  },
+
+  journalClasse: {
+    title: "📦 DB — Journal de classe",
+  },
+
+  devoirs: {
+    title: "📝 DB — Devoirs",
+  },
+
+  sequences: {
+    title: "📚 DB — Séquences",
+  },
+
+  seances: {
+    title: "🧩 DB — Séances",
+  },
+
+  suiviOral: {
+    title: "🗣️ DB — Suivi oral",
+  },
+
+  evaluations: {
+    title: "📝 DB — Évaluations",
+  },
+
+  resultats: {
+    title: "📈 DB — Résultats",
+  },
+
+  competences: {
+    title: "🎯 DB — Compétences",
+  },
+
+  maitriseCompetences: {
+    title: "📊 DB — Maîtrise des compétences",
+  },
+
+  ressources: {
+    title: "📄 DB — Ressources",
+  },
+
+  observationsPedagogiques: {
+    title: "📊 DB — Observations pédagogiques",
+  },
+
+  objectifsIndividuels: {
+    title: "🎯 DB — Objectifs individuels",
+  },
+
+  etablissements: {
+    title: "🏫 DB — Établissements",
+  },
+
+  emploiDuTemps: {
+    title: "🎓 DB — Emploi du temps",
+  },
+
+  rdvParents: {
+    title: "👥 DB — RDV Parents",
+  },
+
+  rdvParentsProfs: {
+    title: "🏫 DB — RDV Parents-Profs",
+  },
+
+  sessionsParentsProfs: {
+    title: "📅 DB — Sessions Parents-Profs",
+  },
+
+  agendaEnseignant: {
+    title: "📅 DB — Agenda enseignant",
+  },
+
+  periodesScolaires: {
+    title: "📅 DB — Périodes scolaires",
+  },
+
   occurrences: {
     title: "📆 DB — Occurrences de cours",
+
     requiredProperties: {
       "📆 Cours prévu": "title",
       "📅 Date et heure": "date",
@@ -14,8 +128,17 @@ const REQUIRED_DATABASES = {
     },
   },
 
+  tachesProfesseur: {
+    title: "📌 DB - Tâches professeur",
+  },
+
+  bilansClasse: {
+    title: "📊 DB — Bilans de classe",
+  },
+
   inscriptions: {
     title: "🎒 DB — Inscriptions élèves",
+
     requiredProperties: {
       "🎒 Inscription": "title",
       "🎓 Classe": "relation",
@@ -24,24 +147,30 @@ const REQUIRED_DATABASES = {
     },
   },
 
-  presences: {
-    title: "👤 DB — Présences",
-    requiredProperties: {
-      "👤 Entrée de présence": "title",
-      "🎒 Inscription élève": "relation",
-      "✅ Statut de présence": "select",
-      "📋 Feuille d’appel": "relation",
-    },
+  suiviQuotidien: {
+    title: "📋 DB — Suivi quotidien",
   },
 
   feuillesAppel: {
     title: "📝 DB — Feuilles d’appel",
+
     requiredProperties: {
       "📝 Entrée d’appel": "title",
       "🎓 Classe": "relation",
       "👤 Présences": "relation",
       "📅 Occurrence de cours": "relation",
       "📅 Date et heure de l’appel": "date",
+    },
+  },
+
+  presences: {
+    title: "👤 DB — Présences",
+
+    requiredProperties: {
+      "👤 Entrée de présence": "title",
+      "🎒 Inscription élève": "relation",
+      "✅ Statut de présence": "select",
+      "📋 Feuille d’appel": "relation",
     },
   },
 };
@@ -230,8 +359,22 @@ function getDatabaseTitle(database) {
 
 function validateDatabase(
   database,
-  requiredProperties
+  requiredProperties = null
 ) {
+  /*
+    Si aucune structure n'est encore connue,
+    le titre exact suffit pour cette première
+    version d'installation.
+  */
+
+  if (!requiredProperties) {
+    return {
+      valid: true,
+      missing: [],
+      wrongTypes: [],
+    };
+  }
+
   const actualProperties =
     database?.properties || {};
 
@@ -285,6 +428,7 @@ function findDatabase(
     exactTitleMatches.map(
       (database) => ({
         database,
+
         validation: validateDatabase(
           database,
           definition.requiredProperties
@@ -300,8 +444,10 @@ function findDatabase(
   if (validMatches.length === 1) {
     return {
       status: "found",
+
       database:
         validMatches[0].database,
+
       validation:
         validMatches[0].validation,
     };
@@ -311,14 +457,17 @@ function findDatabase(
     return {
       status: "ambiguous",
       database: null,
+
       candidates:
         validMatches.map(
           (item) => ({
             id: item.database.id,
+
             title:
               getDatabaseTitle(
                 item.database
               ),
+
             url:
               item.database.url || null,
           })
@@ -330,14 +479,17 @@ function findDatabase(
     return {
       status: "invalid_structure",
       database: null,
+
       candidates:
         evaluated.map(
           (item) => ({
             id: item.database.id,
+
             title:
               getDatabaseTitle(
                 item.database
               ),
+
             validation:
               item.validation,
           })
@@ -349,6 +501,50 @@ function findDatabase(
     status: "not_found",
     database: null,
   };
+}
+
+function toComponentKey(key) {
+  const mapping = {
+    anneesScolaires: "annees_scolaires",
+    classes: "classes",
+    eleves: "eleves",
+    besoinsParticuliers: "besoins_particuliers",
+    adaptations: "adaptations",
+    incidents: "incidents",
+    remediations: "remediations",
+    journalClasse: "journal_classe",
+    devoirs: "devoirs",
+    sequences: "sequences",
+    seances: "seances",
+    suiviOral: "suivi_oral",
+    evaluations: "evaluations",
+    resultats: "resultats",
+    competences: "competences",
+    maitriseCompetences:
+      "maitrise_competences",
+    ressources: "ressources",
+    observationsPedagogiques:
+      "observations_pedagogiques",
+    objectifsIndividuels:
+      "objectifs_individuels",
+    etablissements: "etablissements",
+    emploiDuTemps: "emploi_du_temps",
+    rdvParents: "rdv_parents",
+    rdvParentsProfs: "rdv_parents_profs",
+    sessionsParentsProfs:
+      "sessions_parents_profs",
+    agendaEnseignant: "agenda_enseignant",
+    periodesScolaires: "periodes_scolaires",
+    occurrences: "occurrences",
+    tachesProfesseur: "taches_professeur",
+    bilansClasse: "bilans_classe",
+    inscriptions: "inscriptions",
+    suiviQuotidien: "suivi_quotidien",
+    feuillesAppel: "feuilles_appel",
+    presences: "presences",
+  };
+
+  return mapping[key] || key;
 }
 
 export default async function handler(
@@ -397,10 +593,16 @@ export default async function handler(
         .map(
           ([key, result]) => ({
             key,
+
+            component_key:
+              toComponentKey(key),
+
             expected_title:
               REQUIRED_DATABASES[key].title,
+
             status:
               result.status,
+
             candidates:
               result.candidates || [],
           })
@@ -425,11 +627,85 @@ export default async function handler(
 
           database_count:
             databases.length,
+
+          expected_database_count:
+            Object.keys(
+              REQUIRED_DATABASES
+            ).length,
+
+          detected_database_count:
+            Object.values(detection)
+              .filter(
+                (result) =>
+                  result.status === "found"
+              )
+              .length,
         },
 
         failures,
       });
     }
+
+    /*
+      Enregistrement des 33 composants.
+
+      Une ligne par base :
+      workspace_id + component_key
+    */
+
+    for (
+      const [key, result]
+      of Object.entries(detection)
+    ) {
+      const database =
+        result.database;
+
+      const componentKey =
+        toComponentKey(key);
+
+      const title =
+        getDatabaseTitle(database);
+
+      await sql`
+        INSERT INTO notion_workspace_components (
+          workspace_id,
+          component_key,
+          notion_object_id,
+          notion_object_type,
+          notion_title,
+          updated_at
+        )
+        VALUES (
+          ${connection.workspace_id},
+          ${componentKey},
+          ${database.id},
+          ${"database"},
+          ${title},
+          NOW()
+        )
+        ON CONFLICT (
+          workspace_id,
+          component_key
+        )
+        DO UPDATE SET
+          notion_object_id =
+            EXCLUDED.notion_object_id,
+          notion_object_type =
+            EXCLUDED.notion_object_type,
+          notion_title =
+            EXCLUDED.notion_title,
+          updated_at = NOW()
+      `;
+    }
+
+    /*
+      Compatibilité avec le système actuel.
+
+      On continue à remplir
+      notion_workspace_config
+      pour que faire-appel.js
+      puisse être migré progressivement.
+    */
 
     const occurrencesDb =
       detection.occurrences.database;
@@ -473,11 +749,30 @@ export default async function handler(
         updated_at = NOW()
     `;
 
+    const detected = {};
+
+    for (
+      const [key, result]
+      of Object.entries(detection)
+    ) {
+      detected[
+        toComponentKey(key)
+      ] = {
+        id:
+          result.database.id,
+
+        title:
+          getDatabaseTitle(
+            result.database
+          ),
+      };
+    }
+
     return res.status(200).json({
       ok: true,
 
       message:
-        "Installation automatique réussie.",
+        "Installation complète de Mi Espacio Docente réussie.",
 
       workspace: {
         id:
@@ -488,43 +783,18 @@ export default async function handler(
           null,
       },
 
-      detected: {
-        occurrences: {
-          id:
-            occurrencesDb.id,
-          title:
-            getDatabaseTitle(
-              occurrencesDb
-            ),
-        },
+      summary: {
+        expected: 33,
+        detected:
+          Object.keys(detected).length,
 
-        inscriptions: {
-          id:
-            inscriptionsDb.id,
-          title:
-            getDatabaseTitle(
-              inscriptionsDb
-            ),
-        },
+        saved_components:
+          Object.keys(detected).length,
 
-        presences: {
-          id:
-            presencesDb.id,
-          title:
-            getDatabaseTitle(
-              presencesDb
-            ),
-        },
-
-        feuilles_appel: {
-          id:
-            feuillesAppelDb.id,
-          title:
-            getDatabaseTitle(
-              feuillesAppelDb
-            ),
-        },
+        legacy_config_updated: true,
       },
+
+      detected,
 
       saved_to_neon: true,
     });
