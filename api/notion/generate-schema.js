@@ -51,7 +51,7 @@ const OFFICIAL_DATABASES = {
   },
 
   journal_classe: {
-    title: "📦 DB — Journal de classe",
+    title: "📔 DB — Journal de classe",
   },
 
   devoirs: {
@@ -107,7 +107,7 @@ const OFFICIAL_DATABASES = {
   },
 
   rdv_parents: {
-    title: "👥 DB — RDV Parents",
+    title: "👪 DB — RDV Parents",
   },
 
   rdv_parents_profs: {
@@ -205,6 +205,15 @@ function getDatabaseTitle(database) {
     ) ||
     "(Sans titre)"
   );
+}
+
+function normalizeDatabaseTitle(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\u00A0/g, " ")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 async function notion(
@@ -375,10 +384,16 @@ function findExactMatches(
   databases,
   expectedTitle
 ) {
+  const normalizedExpectedTitle =
+    normalizeDatabaseTitle(
+      expectedTitle
+    );
+
   return databases.filter(
     (database) =>
-      getDatabaseTitle(database) ===
-      expectedTitle
+      normalizeDatabaseTitle(
+        getDatabaseTitle(database)
+      ) === normalizedExpectedTitle
   );
 }
 
