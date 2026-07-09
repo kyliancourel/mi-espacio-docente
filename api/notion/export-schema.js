@@ -7,6 +7,7 @@ const NOTION_VERSION = "2022-06-28";
 
   Cet endpoint :
   - cherche uniquement ces 33 titres ;
+  - normalise les titres pour éviter les problèmes Unicode ;
   - détecte les absences et doublons ;
   - exporte toutes les propriétés réelles ;
   - affiche les bases accessibles non appariées ;
@@ -44,7 +45,7 @@ const OFFICIAL_DATABASES = {
   },
 
   journal_classe: {
-    title: "📦 DB — Journal de classe",
+    title: "📔 DB — Journal de classe",
   },
 
   devoirs: {
@@ -100,7 +101,7 @@ const OFFICIAL_DATABASES = {
   },
 
   rdv_parents: {
-    title: "👥 DB — RDV Parents",
+    title: "👪 DB — RDV Parents",
   },
 
   rdv_parents_profs: {
@@ -149,14 +150,16 @@ const OFFICIAL_DATABASES = {
 };
 
 function getCookie(req, name) {
-  const cookieHeader = req.headers.cookie || "";
+  const cookieHeader =
+    req.headers.cookie || "";
 
   const cookies = cookieHeader
     .split(";")
     .map((cookie) => cookie.trim());
 
   for (const cookie of cookies) {
-    const separatorIndex = cookie.indexOf("=");
+    const separatorIndex =
+      cookie.indexOf("=");
 
     if (separatorIndex === -1) {
       continue;
@@ -196,6 +199,28 @@ function getDatabaseTitle(database) {
     ) ||
     "(Sans titre)"
   );
+}
+
+/*
+  Normalise un titre avant comparaison.
+
+  Cela protège contre :
+  - espaces insécables ;
+  - espaces invisibles ;
+  - caractères Unicode équivalents ;
+  - espaces multiples ;
+  - espaces en début ou fin.
+*/
+function normalizeDatabaseTitle(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\u00A0/g, " ")
+    .replace(
+      /[\u200B-\u200D\uFEFF]/g,
+      ""
+    )
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 async function notion(
@@ -379,14 +404,27 @@ function exportProperties(database) {
   return exported;
 }
 
+/*
+  Compare les titres après normalisation.
+
+  Le nom historique de la fonction est
+  conservé pour limiter les modifications
+  du reste du fichier.
+*/
 function findExactMatches(
   databases,
   expectedTitle
 ) {
+  const normalizedExpectedTitle =
+    normalizeDatabaseTitle(
+      expectedTitle
+    );
+
   return databases.filter(
     (database) =>
-      getDatabaseTitle(database) ===
-      expectedTitle
+      normalizeDatabaseTitle(
+        getDatabaseTitle(database)
+      ) === normalizedExpectedTitle
   );
 }
 
@@ -426,6 +464,13 @@ function findUnmatchedDatabases(
         title:
           getDatabaseTitle(
             database
+          ),
+
+        normalized_title:
+          normalizeDatabaseTitle(
+            getDatabaseTitle(
+              database
+            )
           ),
 
         url:
@@ -491,6 +536,11 @@ export default async function handler(
 
           expected_title:
             definition.title,
+
+          normalized_expected_title:
+            normalizeDatabaseTitle(
+              definition.title
+            ),
         });
 
         continue;
@@ -513,6 +563,13 @@ export default async function handler(
                 title:
                   getDatabaseTitle(
                     database
+                  ),
+
+                normalized_title:
+                  normalizeDatabaseTitle(
+                    getDatabaseTitle(
+                      database
+                    )
                   ),
 
                 url:
