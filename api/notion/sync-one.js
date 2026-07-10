@@ -1217,3 +1217,34 @@ export default async function handler(req, res) {
       });
   }
 }
+/*
+  Exports internes pour les tests contrôlés
+  et les futurs orchestrateurs du moteur.
+
+  Aucun impact sur l'endpoint Vercel :
+  l'export default handler reste inchangé.
+*/
+export {
+  NOTION_VERSION,
+  getCookie,
+  normalizeId,
+  compareVersions,
+  sha256,
+  notion,
+  listAllTemplates,
+  listAllBlockChildren,
+  extractRichText,
+  sanitizeBlockPayload,
+  readBlockTree,
+  canonicalize,
+  calculateFingerprint,
+  countBlocks,
+  countBlockTypes,
+  buildSnapshot,
+  findTemplateById,
+  sleep,
+  waitForStableFingerprint,
+  getContext,
+  validateSyncCandidate,
+  applyTemplateNatively,
+};
