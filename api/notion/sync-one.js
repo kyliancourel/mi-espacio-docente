@@ -289,11 +289,34 @@ async function readBlockTree(
       block.has_children &&
       depth < MAX_DEPTH
     ) {
-      item.children = await readBlockTree(
-        accessToken,
-        block.id,
-        depth + 1
-      );
+      try {
+        item.children = await readBlockTree(
+          accessToken,
+          block.id,
+          depth + 1
+        );
+      } catch (error) {
+        /*
+          Tolérance uniquement pour un enfant
+          imbriqué devenu/non lisible.
+
+          La lecture du parent racine reste stricte,
+          car son erreur survient avant cette boucle.
+        */
+        if (
+          error?.notionStatus === 404 ||
+          error?.notionStatus === 403
+        ) {
+          item.children_unreadable = {
+            status:
+              error.notionStatus,
+            code:
+              error?.notionData?.code || null,
+          };
+        } else {
+          throw error;
+        }
+      }
     }
 
     result.push(item);
@@ -301,7 +324,6 @@ async function readBlockTree(
 
   return result;
 }
-
 function canonicalize(value) {
   if (Array.isArray(value)) {
     return value.map((item) =>
