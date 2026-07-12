@@ -11,9 +11,6 @@ import {
   buildSnapshot,
 } from "./sync-one.js";
 
-const currentSnapshot =
-    buildSnapshot(masterTree);
-
 function incrementPatchVersion(version) {
   const parts = String(version || "1.0.0")
     .split(".")
@@ -241,6 +238,9 @@ export default async function handler(req, res) {
 
     const currentFingerprint =
       calculateFingerprint(masterTree);
+
+    const currentSnapshot =
+  buildSnapshot(masterTree);
 
     const previousFingerprint =
       official.official_fingerprint;
@@ -537,26 +537,6 @@ if (!published) {
 */
 
 export {
-  NOTION_VERSION,
-  getCookie,
-  normalizeId,
-  compareVersions,
-  sha256,
-  notion,
-  listAllTemplates,
-  listAllBlockChildren,
-  extractRichText,
-  sanitizeBlockPayload,
-  readBlockTree,
-  canonicalize,
-  calculateFingerprint,
-  countBlocks,
-  countBlockTypes,
-  buildSnapshot,
-  findTemplateById,
-  sleep,
-  waitForStableFingerprint,
+  incrementPatchVersion,
   getContext,
-  validateSyncCandidate,
-  applyTemplateNatively,
 };
