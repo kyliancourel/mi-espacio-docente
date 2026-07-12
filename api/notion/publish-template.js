@@ -9,7 +9,7 @@ import {
   readBlockTree,
   calculateFingerprint,
   buildSnapshot,
-} from "./sync-one.js";
+} from "./sync-engine.js";
 
 function incrementPatchVersion(version) {
   const parts = String(version || "1.0.0")
