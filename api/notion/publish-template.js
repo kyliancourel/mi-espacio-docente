@@ -8,14 +8,11 @@ import {
   findTemplateById,
   readBlockTree,
   calculateFingerprint,
+  buildSnapshot,
 } from "./sync-one.js";
 
-function normalizeId(value) {
-  return String(value || "")
-    .replace(/-/g, "")
-    .toLowerCase()
-    .trim();
-}
+const currentSnapshot =
+    buildSnapshot(masterTree);
 
 function incrementPatchVersion(version) {
   const parts = String(version || "1.0.0")
@@ -169,6 +166,39 @@ export default async function handler(req, res) {
       templateKey
     );
 
+    if (
+  official.master_workspace_id &&
+  official.master_workspace_id !==
+    connection.workspace_id
+) {
+  return res.status(409).json({
+    ok: false,
+
+    engine_stage: "3/6",
+
+    status: "wrong_workspace",
+
+    error:
+      "Publication refusée hors du workspace maître.",
+  });
+}
+
+    if (
+  !official.master_notion_template_id ||
+  !official.master_notion_data_source_id
+) {
+  return res.status(409).json({
+    ok: false,
+
+    engine_stage: "3/6",
+
+    status: "official_reference_incomplete",
+
+    error:
+      "Référence officielle incomplète.",
+  });
+}
+
     const accessToken =
       connection.access_token;
 
@@ -288,47 +318,45 @@ export default async function handler(req, res) {
       Mise à jour du registre officiel.
     */
     const updatedRows = await sql`
-      UPDATE notion_official_templates
-      SET
-        official_version =
-          ${nextVersion},
+   UPDATE notion_official_templates
+SET
+    official_version = ${nextVersion},
+    official_fingerprint = ${currentFingerprint},
+    updated_at = now()
 
-        official_fingerprint =
-          ${currentFingerprint},
+WHERE
+    id = ${official.id}
 
-        updated_at = now()
+AND
+    official_fingerprint = ${previousFingerprint}
 
-      WHERE id = ${official.id}
-
-      RETURNING
-        id,
-        template_key,
-        component_key,
-        notion_template_name,
-        master_workspace_id,
-        master_notion_template_id,
-        master_notion_data_source_id,
-        official_version,
-        official_fingerprint,
-        updated_at
+RETURNING
+    id,
+    template_key,
+    component_key,
+    notion_template_name,
+    master_workspace_id,
+    master_notion_template_id,
+    master_notion_data_source_id,
+    official_version,
+    official_fingerprint,
+    updated_at
     `;
 
-    const published =
-      updatedRows[0] || null;
+const published = updatedRows[0] || null;
 
-    if (!published) {
-      return res.status(500).json({
+if (!published) {
+    return res.status(409).json({
         ok: false,
 
         engine_stage: "3/6",
 
-        status:
-          "official_registry_update_failed",
+        status: "publication_conflict",
 
         error:
-          "Impossible de mettre à jour le registre officiel.",
-      });
-    }
+            "Une autre publication a été effectuée pendant cette opération. Rechargez puis republiez."
+    });
+}
 
     /*
       Relecture immédiate afin de prouver
@@ -432,6 +460,9 @@ export default async function handler(req, res) {
         published_fingerprint:
           currentFingerprint,
 
+        snapshot:
+        currentSnapshot,
+
         fingerprint_changed:
           previousFingerprint !==
           currentFingerprint,
@@ -506,7 +537,6 @@ export default async function handler(req, res) {
 */
 
 export {
-  normalizeId,
   incrementPatchVersion,
   getContext,
 };
