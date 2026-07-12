@@ -376,7 +376,7 @@ export default async function handler(req, res) {
         '0.9.0',
         ${official.official_fingerprint},
         ${labBeforeFingerprint},
-        'update_available',
+        'outdated',
         false,
         false,
         false,
