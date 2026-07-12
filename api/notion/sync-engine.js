@@ -606,6 +606,66 @@ async function getContext(req, templateKey) {
   };
 }
 
+async function scanTemplate({
+  accessToken,
+  notionDataSourceId,
+  notionTemplateId,
+}) {
+
+  const templates =
+    await listAllTemplates(
+      accessToken,
+      notionDataSourceId
+    );
+
+  const template =
+    findTemplateById(
+      templates,
+      notionTemplateId
+    );
+
+  if (!template) {
+    return {
+      found: false,
+      template: null,
+      tree: null,
+      fingerprint: null,
+      snapshot: null,
+    };
+  }
+
+  await notion(
+    accessToken,
+    `/pages/${template.id}`,
+    {
+      method: "GET",
+    }
+  );
+
+  const tree =
+    await readBlockTree(
+      accessToken,
+      template.id
+    );
+
+  return {
+
+    found: true,
+
+    template,
+
+    tree,
+
+    fingerprint:
+      calculateFingerprint(tree),
+
+    snapshot:
+      buildSnapshot(tree),
+
+  };
+
+}
+
 function validateSyncCandidate({
   local,
   official,
@@ -1239,6 +1299,96 @@ async function handler(req, res) {
       });
   }
 }
+
+/*
+============================================================
+
+SERVICES
+
+============================================================
+*/
+
+/*
+Analyse complète d'un template.
+
+Cette fonction deviendra
+le cœur de check-updates,
+sync-one et sync-all.
+*/
+async function scanTemplate() {
+
+  throw new Error(
+    "scanTemplate() non implémenté."
+  );
+
+}
+
+/*
+Publication officielle
+du template maître.
+
+Cette fonction remplacera
+publish-template.js
+*/
+async function publishTemplate(
+  req,
+  res
+) {
+
+  throw new Error(
+    "publishTemplate() non implémenté."
+  );
+
+}
+
+/*
+Détection des mises à jour.
+
+Cette fonction remplacera
+check-updates.js
+*/
+async function checkUpdates(
+  req,
+  res
+) {
+
+  throw new Error(
+    "checkUpdates() non implémenté."
+  );
+
+}
+
+/*
+Synchronisation
+d'un template.
+
+Cette fonction remplacera
+le handler actuel.
+*/
+async function syncOne(
+  req,
+  res
+) {
+
+  return handler(req,res);
+
+}
+
+/*
+Synchronisation
+de tous les templates.
+*/
+async function syncAll(
+  req,
+  res
+) {
+
+  throw new Error(
+    "syncAll() non implémenté."
+  );
+
+}
+
 /*
   Exports internes pour les tests contrôlés
   et les futurs orchestrateurs du moteur.
