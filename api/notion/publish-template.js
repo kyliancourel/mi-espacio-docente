@@ -537,6 +537,26 @@ if (!published) {
 */
 
 export {
-  incrementPatchVersion,
+  NOTION_VERSION,
+  getCookie,
+  normalizeId,
+  compareVersions,
+  sha256,
+  notion,
+  listAllTemplates,
+  listAllBlockChildren,
+  extractRichText,
+  sanitizeBlockPayload,
+  readBlockTree,
+  canonicalize,
+  calculateFingerprint,
+  countBlocks,
+  countBlockTypes,
+  buildSnapshot,
+  findTemplateById,
+  sleep,
+  waitForStableFingerprint,
   getContext,
+  validateSyncCandidate,
+  applyTemplateNatively,
 };
