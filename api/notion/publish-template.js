@@ -3,12 +3,7 @@ import { neon } from "@neondatabase/serverless";
 import {
   NOTION_VERSION,
   getCookie,
-  notion,
-  listAllTemplates,
-  findTemplateById,
-  readBlockTree,
-  calculateFingerprint,
-  buildSnapshot,
+  scanTemplate,
 } from "./sync-engine.js";
 
 function incrementPatchVersion(version) {
