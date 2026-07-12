@@ -831,7 +831,7 @@ async function applyTemplateNatively({
   );
 }
 
-async function handler(req, res) {
+async function runSyncOne(req, res) {
   try {
     if (req.method !== "POST") {
       res.setHeader("Allow", "POST");
@@ -1298,6 +1298,10 @@ async function handler(req, res) {
           "Erreur interne du serveur.",
       });
   }
+}
+
+async function syncOne(req, res) {
+  return runSyncOne(req, res);
 }
 
 /*
