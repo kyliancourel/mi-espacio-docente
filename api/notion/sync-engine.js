@@ -1359,8 +1359,363 @@ async function applyTemplateNatively({
   );
 }
 
+async function syncTemplate({
+  sql,
+  connection,
+  local,
+  official,
+  templateKey,
+}) {
+  const accessToken =
+    connection.access_token;
+
+  const beforeScan = await scanTemplate({
+    accessToken,
+    notionDataSourceId:
+      local.notion_data_source_id,
+    notionTemplateId:
+      local.notion_template_id,
+  });
+
+  if (!beforeScan.found) {
+    return {
+      ok: false,
+      engine_stage: "4/6",
+      template_key: templateKey,
+      status: "missing_template",
+      error:
+        "Le template local réel n'est plus détecté dans Notion.",
+      safety: {
+        notion_write_operations: 0,
+        neon_write_operations: 0,
+        automatic_sync_executed: false,
+      },
+    };
+  }
+
+  const validation =
+    validateSyncCandidate({
+      local,
+      official,
+      currentFingerprint:
+        beforeScan.fingerprint,
+    });
+
+  if (!validation.allowed) {
+    return {
+      ok: false,
+      engine_stage: "4/6",
+      message:
+        "Synchronisation native refusée par les contrôles de sécurité.",
+      template_key: templateKey,
+      status: validation.status,
+      reason: validation.reason,
+
+      before: {
+        installed_version:
+          local.installed_version,
+
+        official_version:
+          official.official_version,
+
+        stored_local_fingerprint:
+          local.local_fingerprint,
+
+        current_real_fingerprint:
+          beforeScan.fingerprint,
+
+        official_fingerprint:
+          official.official_fingerprint,
+
+        snapshot:
+          beforeScan.snapshot,
+      },
+
+      safety: {
+        notion_write_operations: 0,
+        neon_write_operations: 0,
+        automatic_sync_executed: false,
+      },
+    };
+  }
+
+  const masterTemplateId =
+    official.master_notion_template_id;
+
+  if (!masterTemplateId) {
+    return {
+      ok: false,
+      engine_stage: "4/6",
+      status: "master_template_missing",
+      error:
+        "Aucun master_notion_template_id central.",
+    };
+  }
+
+  await notion(
+    accessToken,
+    `/pages/${masterTemplateId}`,
+    {
+      method: "GET",
+    }
+  );
+
+  const preWriteScan = await scanTemplate({
+    accessToken,
+    notionDataSourceId:
+      local.notion_data_source_id,
+    notionTemplateId:
+      beforeScan.template.id,
+  });
+
+  if (
+    !preWriteScan.found ||
+    preWriteScan.fingerprint !==
+      beforeScan.fingerprint
+  ) {
+    return {
+      ok: false,
+      engine_stage: "4/6",
+      status: "concurrent_local_change",
+      error:
+        "Le template local a changé pendant la préparation de la synchronisation. Écriture annulée.",
+
+      safety: {
+        notion_write_operations: 0,
+        neon_write_operations: 0,
+        automatic_sync_executed: false,
+      },
+    };
+  }
+
+  const nativeApplyResponse =
+    await applyTemplateNatively({
+      accessToken,
+      targetTemplateId:
+        beforeScan.template.id,
+      sourceTemplateId:
+        masterTemplateId,
+    });
+
+  const stabilization =
+    await waitForStableFingerprint({
+      accessToken,
+      templateId:
+        beforeScan.template.id,
+      expectedFingerprint:
+        official.official_fingerprint,
+    });
+
+  if (!stabilization.stable) {
+    return {
+      ok: false,
+      engine_stage: "4/6",
+      status:
+        "native_sync_verification_failed",
+
+      error:
+        "La synchronisation Notion a été acceptée, mais le fingerprint final officiel n'a pas été confirmé.",
+
+      native_apply: {
+        accepted: true,
+        response_id:
+          nativeApplyResponse?.id || null,
+      },
+
+      stabilization,
+
+      safety: {
+        notion_write_operations: 1,
+        neon_write_operations: 0,
+        tracking_updated: false,
+      },
+    };
+  }
+
+  const updateRows = await sql`
+    UPDATE notion_workspace_templates
+    SET
+      installed_version =
+        ${official.official_version},
+
+      official_version =
+        ${official.official_version},
+
+      official_fingerprint =
+        ${official.official_fingerprint},
+
+      local_fingerprint =
+        ${official.official_fingerprint},
+
+      sync_status = 'current',
+
+      locally_modified = false,
+
+      conflict_detected = false,
+
+      last_detected_at = now(),
+
+      last_synced_at = now(),
+
+      updated_at = now()
+
+    WHERE workspace_id =
+      ${connection.workspace_id}
+
+      AND template_key =
+      ${templateKey}
+
+      AND notion_template_id =
+      ${local.notion_template_id}
+
+    RETURNING
+      id,
+      workspace_id,
+      template_key,
+      installed_version,
+      local_fingerprint,
+      sync_status,
+      locally_modified,
+      conflict_detected,
+      last_detected_at,
+      last_synced_at
+  `;
+
+  const updatedTracking =
+    updateRows[0] || null;
+
+  if (!updatedTracking) {
+    return {
+      ok: false,
+      engine_stage: "4/6",
+      status:
+        "tracking_update_failed_after_native_sync",
+
+      error:
+        "Le template Notion a été synchronisé et vérifié, mais aucune ligne locale Neon n'a été mise à jour.",
+
+      safety: {
+        notion_write_operations: 1,
+        neon_write_operations: 1,
+        notion_sync_verified: true,
+        tracking_updated: false,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+
+    message:
+      "Synchronisation native contrôlée réussie.",
+
+    engine_stage: "4/6",
+
+    notion_api_version:
+      NOTION_VERSION,
+
+    workspace: {
+      id:
+        connection.workspace_id,
+
+      name:
+        connection.workspace_name ||
+        null,
+    },
+
+    template: {
+      template_key:
+        templateKey,
+
+      component_key:
+        local.component_key,
+
+      name:
+        local.notion_template_name,
+
+      target_template_id:
+        beforeScan.template.id,
+
+      master_template_id:
+        masterTemplateId,
+    },
+
+    versions: {
+      before:
+        local.installed_version,
+
+      after:
+        official.official_version,
+
+      official:
+        official.official_version,
+    },
+
+    fingerprints: {
+      before:
+        beforeScan.fingerprint,
+
+      expected_official:
+        official.official_fingerprint,
+
+      after:
+        stabilization.fingerprint,
+
+      exact_match:
+        stabilization.fingerprint ===
+        official.official_fingerprint,
+    },
+
+    snapshots: {
+      before:
+        beforeScan.snapshot,
+
+      after:
+        stabilization.snapshot,
+    },
+
+    native_apply: {
+      accepted: true,
+
+      erase_content: true,
+
+      response_id:
+        nativeApplyResponse?.id ||
+        null,
+    },
+
+    stabilization,
+
+    tracking: {
+      updated: true,
+      row:
+        updatedTracking,
+    },
+
+    safety: {
+      pre_write_revalidation:
+        true,
+
+      concurrent_change_check:
+        true,
+
+      notion_write_operations:
+        1,
+
+      neon_write_operations:
+        1,
+
+      fingerprint_verified_before_tracking:
+        true,
+
+      automatic_sync_executed:
+        true,
+    },
+  };
+}
+
 async function runSyncOne(req, res) {
-   {
+  try {
     if (req.method !== "POST") {
       res.setHeader("Allow", "POST");
 
@@ -1401,7 +1756,7 @@ async function runSyncOne(req, res) {
         .status(409)
         .json({
           ok: false,
-          engine_stage: "2/6",
+          engine_stage: "4/6",
           template_key: templateKey,
           status: !official
             ? "official_template_not_registered"
@@ -1411,401 +1766,30 @@ async function runSyncOne(req, res) {
         });
     }
 
-    const accessToken =
-      connection.access_token;
+    const report = await syncTemplate({
+      sql,
+      connection,
+      local,
+      official,
+      templateKey,
+    });
 
-    const realTemplates =
-      await listAllTemplates(
-        accessToken,
-        local.notion_data_source_id
-      );
-
-    const realTemplate =
-      findTemplateById(
-        realTemplates,
-        local.notion_template_id
-      );
-
-    if (!realTemplate) {
+    if (report.ok) {
       return res
-        .status(409)
-        .json({
-          ok: false,
-          engine_stage: "2/6",
-          template_key: templateKey,
-          status: "missing_template",
-          error:
-            "Le template local réel n'est plus détecté dans Notion.",
-        });
+        .status(200)
+        .json(report);
     }
 
-    await notion(
-      accessToken,
-      `/pages/${realTemplate.id}`,
-      {
-        method: "GET",
-      }
-    );
-
-    const beforeTree =
-      await readBlockTree(
-        accessToken,
-        realTemplate.id
-      );
-
-    const beforeFingerprint =
-      calculateFingerprint(beforeTree);
-
-    const beforeSnapshot =
-      buildSnapshot(beforeTree);
-
-    const validation =
-      validateSyncCandidate({
-        local,
-        official,
-        currentFingerprint:
-          beforeFingerprint,
-      });
-
-    if (!validation.allowed) {
-      return res
-        .status(409)
-        .json({
-          ok: false,
-          engine_stage: "2/6",
-          message:
-            "Synchronisation native refusée par les contrôles de sécurité.",
-          template_key: templateKey,
-          status: validation.status,
-          reason: validation.reason,
-
-          before: {
-            installed_version:
-              local.installed_version,
-
-            official_version:
-              official.official_version,
-
-            stored_local_fingerprint:
-              local.local_fingerprint,
-
-            current_real_fingerprint:
-              beforeFingerprint,
-
-            official_fingerprint:
-              official.official_fingerprint,
-
-            snapshot:
-              beforeSnapshot,
-          },
-
-          safety: {
-            notion_write_operations: 0,
-            neon_write_operations: 0,
-            automatic_sync_executed: false,
-          },
-        });
-    }
-
-    const masterTemplateId =
-      official.master_notion_template_id;
-
-    if (!masterTemplateId) {
-      return res
-        .status(409)
-        .json({
-          ok: false,
-          engine_stage: "2/6",
-          status: "master_template_missing",
-          error:
-            "Aucun master_notion_template_id central.",
-        });
-    }
-
-    /*
-      Vérification supplémentaire :
-      le maître officiel doit être lisible
-      avec le token courant.
-
-      Dans ton architecture actuelle, le
-      workspace maître est le workspace testé.
-      Pour une future architecture multi-client,
-      il faudra un accès serveur dédié au maître.
-    */
-    await notion(
-      accessToken,
-      `/pages/${masterTemplateId}`,
-      {
-        method: "GET",
-      }
-    );
-
-    /*
-      Dernière vérification juste avant écriture :
-      protection contre une modification locale
-      intervenue entre le premier scan et le PATCH.
-    */
-    const preWriteTree =
-      await readBlockTree(
-        accessToken,
-        realTemplate.id
-      );
-
-    const preWriteFingerprint =
-      calculateFingerprint(preWriteTree);
-
-    if (
-      preWriteFingerprint !==
-      beforeFingerprint
-    ) {
-      return res
-        .status(409)
-        .json({
-          ok: false,
-          engine_stage: "2/6",
-          status: "concurrent_local_change",
-          error:
-            "Le template local a changé pendant la préparation de la synchronisation. Écriture annulée.",
-
-          safety: {
-            notion_write_operations: 0,
-            neon_write_operations: 0,
-            automatic_sync_executed: false,
-          },
-        });
-    }
-
-    const nativeApplyResponse =
-      await applyTemplateNatively({
-        accessToken,
-        targetTemplateId:
-          realTemplate.id,
-        sourceTemplateId:
-          masterTemplateId,
-      });
-
-    const stabilization =
-      await waitForStableFingerprint({
-        accessToken,
-        templateId:
-          realTemplate.id,
-        expectedFingerprint:
-          official.official_fingerprint,
-      });
-
-    if (!stabilization.stable) {
-      return res
-        .status(500)
-        .json({
-          ok: false,
-          engine_stage: "2/6",
-          status:
-            "native_sync_verification_failed",
-
-          error:
-            "La synchronisation Notion a été acceptée, mais le fingerprint final officiel n'a pas été confirmé.",
-
-          native_apply: {
-            accepted: true,
-            response_id:
-              nativeApplyResponse?.id || null,
-          },
-
-          stabilization,
-
-          safety: {
-            notion_write_operations: 1,
-            neon_write_operations: 0,
-            tracking_updated: false,
-          },
-        });
-    }
-
-    /*
-      Neon n'est mis à jour qu'après preuve
-      du fingerprint final officiel.
-    */
-    const updateRows = await sql`
-      UPDATE notion_workspace_templates
-      SET
-        installed_version =
-          ${official.official_version},
-
-        official_version =
-          ${official.official_version},
-
-        official_fingerprint =
-          ${official.official_fingerprint},
-
-        local_fingerprint =
-          ${official.official_fingerprint},
-
-        sync_status = 'current',
-
-        locally_modified = false,
-
-        conflict_detected = false,
-
-        last_detected_at = now(),
-
-        last_synced_at = now(),
-
-        updated_at = now()
-
-      WHERE workspace_id =
-        ${connection.workspace_id}
-
-        AND template_key =
-          ${templateKey}
-
-      RETURNING
-        id,
-        workspace_id,
-        template_key,
-        installed_version,
-        local_fingerprint,
-        sync_status,
-        locally_modified,
-        conflict_detected,
-        last_detected_at,
-        last_synced_at
-    `;
-
-    const updatedTracking =
-      updateRows[0] || null;
-
-    if (!updatedTracking) {
-      return res
-        .status(500)
-        .json({
-          ok: false,
-          engine_stage: "2/6",
-          status:
-            "tracking_update_failed_after_native_sync",
-
-          error:
-            "Le template Notion a été synchronisé et vérifié, mais aucune ligne locale Neon n'a été mise à jour.",
-
-          safety: {
-            notion_write_operations: 1,
-            neon_write_operations: 1,
-            notion_sync_verified: true,
-            tracking_updated: false,
-          },
-        });
-    }
+    const statusCode = [
+      "native_sync_verification_failed",
+      "tracking_update_failed_after_native_sync",
+    ].includes(report.status)
+      ? 500
+      : 409;
 
     return res
-      .status(200)
-      .json({
-        ok: true,
-
-        message:
-          "Synchronisation native contrôlée réussie.",
-
-        engine_stage: "2/6",
-
-        notion_api_version:
-          NOTION_VERSION,
-
-        workspace: {
-          id:
-            connection.workspace_id,
-
-          name:
-            connection.workspace_name ||
-            null,
-        },
-
-        template: {
-          template_key:
-            templateKey,
-
-          component_key:
-            local.component_key,
-
-          name:
-            local.notion_template_name,
-
-          target_template_id:
-            realTemplate.id,
-
-          master_template_id:
-            masterTemplateId,
-        },
-
-        versions: {
-          before:
-            local.installed_version,
-
-          after:
-            official.official_version,
-
-          official:
-            official.official_version,
-        },
-
-        fingerprints: {
-          before:
-            beforeFingerprint,
-
-          expected_official:
-            official.official_fingerprint,
-
-          after:
-            stabilization.fingerprint,
-
-          exact_match:
-            stabilization.fingerprint ===
-            official.official_fingerprint,
-        },
-
-        snapshots: {
-          before:
-            beforeSnapshot,
-
-          after:
-            stabilization.snapshot,
-        },
-
-        native_apply: {
-          accepted: true,
-
-          erase_content: true,
-
-          response_id:
-            nativeApplyResponse?.id ||
-            null,
-        },
-
-        stabilization,
-
-        tracking: {
-          updated: true,
-          row:
-            updatedTracking,
-        },
-
-        safety: {
-          pre_write_revalidation:
-            true,
-
-          concurrent_change_check:
-            true,
-
-          notion_write_operations:
-            1,
-
-          neon_write_operations:
-            1,
-
-          fingerprint_verified_before_tracking:
-            true,
-
-          automatic_sync_executed:
-            true,
-        },
-      });
+      .status(statusCode)
+      .json(report);
   } catch (error) {
     console.error(
       "Erreur sync-one :",
@@ -1819,7 +1803,7 @@ async function runSyncOne(req, res) {
       .json({
         ok: false,
 
-        engine_stage: "2/6",
+        engine_stage: "4/6",
 
         error:
           error.message ||
@@ -1862,6 +1846,7 @@ export {
   getContext,
   validateSyncCandidate,
   applyTemplateNatively,
+  syncTemplate,
   scanTemplate,
   publishTemplate,
   checkUpdates,
