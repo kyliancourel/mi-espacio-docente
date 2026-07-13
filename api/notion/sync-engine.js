@@ -1200,6 +1200,142 @@ function validateSyncCandidate({
   };
 }
 
+async function checkUpdates(req, res) {
+  try {
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+
+      return res.status(405).json({
+        ok: false,
+        error: "Méthode non autorisée",
+      });
+    }
+
+    const templateKey = String(
+      req.body?.template_key || ""
+    ).trim();
+
+    if (!templateKey) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "template_key est obligatoire.",
+      });
+    }
+
+    const {
+      connection,
+      local,
+      official,
+    } = await getContext(
+      req,
+      templateKey
+    );
+
+    if (!local || !official) {
+      return res.status(409).json({
+        ok: false,
+        engine_stage: "1/6",
+        template_key: templateKey,
+        status: !official
+          ? "official_template_not_registered"
+          : "missing_local_installation",
+        error:
+          "Vérification impossible : état incomplet.",
+      });
+    }
+
+    const scan = await scanTemplate({
+      accessToken: connection.access_token,
+      notionDataSourceId:
+        local.notion_data_source_id,
+      notionTemplateId:
+        local.notion_template_id,
+    });
+
+    if (!scan.found) {
+      return res.status(409).json({
+        ok: false,
+        engine_stage: "1/6",
+        template_key: templateKey,
+        status: "missing_template",
+        error:
+          "Le template local réel n'est plus détecté dans Notion.",
+      });
+    }
+
+    const validation =
+      validateSyncCandidate({
+        local,
+        official,
+        currentFingerprint:
+          scan.fingerprint,
+      });
+
+    return res.status(200).json({
+      ok: true,
+
+      engine_stage: "1/6",
+
+      template_key: templateKey,
+
+      status: validation.status,
+
+      update_available:
+        validation.allowed,
+
+      reason: validation.reason,
+
+      versions: {
+        installed:
+          local.installed_version,
+
+        official:
+          official.official_version,
+      },
+
+      fingerprints: {
+        stored_local:
+          local.local_fingerprint,
+
+        current_real:
+          scan.fingerprint,
+
+        official:
+          official.official_fingerprint,
+      },
+
+      snapshot:
+        scan.snapshot,
+
+      safety: {
+        notion_write_operations: 0,
+        neon_write_operations: 0,
+        automatic_sync_executed: false,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Erreur check-updates :",
+      error
+    );
+
+    return res
+      .status(
+        error.statusCode || 500
+      )
+      .json({
+        ok: false,
+
+        engine_stage: "1/6",
+
+        error:
+          error.message ||
+          "Erreur interne du serveur.",
+      });
+  }
+}
+
 async function applyTemplateNatively({
   accessToken,
   targetTemplateId,
