@@ -1720,6 +1720,8 @@ async function syncWorkspace({
   workspaceTemplates,
   officialTemplates,
 }) {
+  const startedAt = Date.now();
+
   const officialByTemplateKey =
     new Map(
       (officialTemplates || []).map(
@@ -1820,22 +1822,22 @@ async function syncWorkspace({
   }
 
   const synchronized =
-    templates.filter(
-      (template) => template.ok
-    ).length;
+  templates.filter(
+    (template) => template.ok
+  ).length;
 
-  return {
-    ok: true,
-    engine_stage: "4/6",
-    templates,
-    statistics: {
-      total: templates.length,
+return {
+  ok: true,
+  engine_stage: "4/6",
+  templates,
+  statistics: {
+    total: templates.length,
+    synchronized,
+    failed:
+      templates.length -
       synchronized,
-      failed:
-        templates.length -
-        synchronized,
-    },
-  };
+  },
+};
 }
 
 async function runSyncOne(req, res) {
@@ -1934,56 +1936,7 @@ async function runSyncOne(req, res) {
           "Erreur interne du serveur.",
       });
   }
-  const {
-      sql,
-      connection,
-      local,
-      official,
-    } = await getContext(
-      req,
-      templateKey
-    );
-
- if (!local || !official) {
-      return res
-        .status(409)
-        .json({
-          ok: false,
-          engine_stage: "4/6",
-          template_key: templateKey,
-          status: !official
-            ? "official_template_not_registered"
-            : "missing_local_installation",
-          error:
-            "Synchronisation refusée : état incomplet.",
-        });  
-}
-
-const report = await syncTemplate({
-      sql,
-      connection,
-      local,
-      official,
-      templateKey,
-    });
-
-  if (report.ok) {
-      return res
-        .status(200)
-        .json(report);
-    }
-
-    const statusCode = [
-      "native_sync_verification_failed",
-      "tracking_update_failed_after_native_sync",
-    ].includes(report.status)
-      ? 500
-      : 409;
-
-    return res
-      .status(statusCode)
-      .json(report);
-} catch (error) {
+  catch (error) {
     console.error(
       "Erreur sync-one :",
       error
