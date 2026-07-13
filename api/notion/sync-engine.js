@@ -1864,6 +1864,7 @@ export {
   applyTemplateNatively,
   scanTemplate,
   publishTemplate,
+  checkUpdates,
   syncOne,
   incrementPatchVersion,
 };
