@@ -606,24 +606,38 @@ async function getContext(req, templateKey) {
   };
 }
 
+function incrementPatchVersion(version) {
+  const parts = String(version || "1.0.0")
+    .split(".")
+    .map((part) => {
+      const match = String(part).match(/^\d+/);
+      return match ? Number(match[0]) : 0;
+    });
+
+  while (parts.length < 3) {
+    parts.push(0);
+  }
+
+  parts[2] += 1;
+
+  return `${parts[0]}.${parts[1]}.${parts[2]}`;
+}
+
 async function scanTemplate({
   accessToken,
   notionDataSourceId,
   notionTemplateId,
 }) {
+  const templates = await listAllTemplates(
+    accessToken,
+    notionDataSourceId
+  );
 
-  const templates =
-    await listAllTemplates(
-      accessToken,
-      notionDataSourceId
-    );
-
-  const template =
-    findTemplateById(
-      templates,
-      notionTemplateId
-    );
-
+  const template = findTemplateById(
+    templates,
+    notionTemplateId
+  );
+  
   if (!template) {
     return {
       found: false,
@@ -634,155 +648,6 @@ async function scanTemplate({
     };
   }
 
-  function incrementPatchVersion(version) {
-
-  const parts = String(version || "1.0.0")
-    .split(".")
-    .map((part) => {
-
-      const match =
-        String(part).match(/^\d+/);
-
-      return match
-        ? Number(match[0])
-        : 0;
-
-    });
-
-    async function publishTemplate(req, res) {
-
-  try {
-
-    if (req.method !== "POST") {
-
-      res.setHeader("Allow", "POST");
-
-      return res.status(405).json({
-        ok: false,
-        error: "Méthode non autorisée",
-      });
-
-    }
-
-    const templateKey = String(
-      req.body?.template_key || ""
-    ).trim();
-
-    if (!templateKey) {
-
-      return res.status(400).json({
-        ok: false,
-        error: "template_key est obligatoire.",
-      });
-
-    }
-
-    const {
-      sql,
-      connection,
-      official,
-    } = await getContext(
-      req,
-      templateKey
-    );
-
-    if (!official) {
-
-      return res.status(404).json({
-
-        ok: false,
-
-        engine_stage: "3/6",
-
-        status:
-          "official_template_not_found",
-
-        error:
-          "Template officiel introuvable.",
-
-      });
-
-    }
-
-    if (!official.is_active) {
-
-      return res.status(409).json({
-
-        ok: false,
-
-        engine_stage: "3/6",
-
-        status:
-          "official_template_inactive",
-
-        error:
-          "Le template officiel est désactivé.",
-
-      });
-
-    }
-
-    if (
-
-      official.master_workspace_id &&
-
-      official.master_workspace_id !==
-      connection.workspace_id
-
-    ) {
-
-      return res.status(409).json({
-
-        ok: false,
-
-        engine_stage: "3/6",
-
-        status: "wrong_workspace",
-
-        error:
-          "Publication refusée hors du workspace maître.",
-
-      });
-
-    }
-
-    if (
-
-      !official.master_notion_template_id ||
-
-      !official.master_notion_data_source_id
-
-    ) {
-
-      return res.status(409).json({
-
-        ok: false,
-
-        engine_stage: "3/6",
-
-        status:
-          "official_reference_incomplete",
-
-        error:
-          "Référence officielle incomplète.",
-
-      });
-
-    }
-
-    const accessToken =
-      connection.access_token;
-
-  while (parts.length < 3) {
-    parts.push(0);
-  }
-
-  parts[2] += 1;
-
-  return `${parts[0]}.${parts[1]}.${parts[2]}`;
-
-}
-
   await notion(
     accessToken,
     `/pages/${template.id}`,
@@ -791,28 +656,18 @@ async function scanTemplate({
     }
   );
 
-  const tree =
-    await readBlockTree(
-      accessToken,
-      template.id
-    );
+    const tree = await readBlockTree(
+    accessToken,
+    template.id
+  );
 
   return {
-
     found: true,
-
     template,
-
     tree,
-
-    fingerprint:
-      calculateFingerprint(tree),
-
-    snapshot:
-      buildSnapshot(tree),
-
+    fingerprint: calculateFingerprint(tree),
+    snapshot: buildSnapshot(tree),
   };
-
 }
 
 function validateSyncCandidate({
@@ -1486,8 +1341,6 @@ export {
   scanTemplate,
   syncOne,
   incrementPatchVersion,
-  local,
-official,
 };
 
 export default syncOne;
