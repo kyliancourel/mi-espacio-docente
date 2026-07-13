@@ -1,3 +1,3 @@
-import runSyncOne from "./sync-engine.js";
+import { syncOne } from "./sync-engine.js";
 
-export default runSyncOne;
+export default syncOne;
