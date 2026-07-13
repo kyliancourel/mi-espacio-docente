@@ -1720,6 +1720,7 @@ async function syncWorkspace({
   workspaceTemplates,
   officialTemplates,
 }) {
+  
   const startedAt = Date.now();
 
   const officialByTemplateKey =
@@ -1826,6 +1827,29 @@ async function syncWorkspace({
     (template) => template.ok
   ).length;
 
+  const finishedAt = Date.now();
+
+const statistics = {
+    total: templates.length,
+    synchronized: 0,
+    skipped: 0,
+    failed: 0,
+};
+
+const report = {};
+
+for (const template of templates) {
+
+    if (template.ok) {
+        statistics.synchronized++;
+    } else {
+        statistics.failed++;
+    }
+
+    report[template.status] =
+        (report[template.status] || 0) + 1;
+}
+
 return {
   ok: true,
   engine_stage: "4/6",
@@ -1866,76 +1890,6 @@ async function runSyncOne(req, res) {
             "template_key est obligatoire.",
         });
     }
-
-    const {
-      sql,
-      connection,
-      local,
-      official,
-    } = await getContext(
-      req,
-      templateKey
-    );
-
-    if (!local || !official) {
-      return res
-        .status(409)
-        .json({
-          ok: false,
-          engine_stage: "4/6",
-          template_key: templateKey,
-          status: !official
-            ? "official_template_not_registered"
-            : "missing_local_installation",
-          error:
-            "Synchronisation refusée : état incomplet.",
-        });
-    }
-
-    const report = await syncTemplate({
-      sql,
-      connection,
-      local,
-      official,
-      templateKey,
-    });
-
-    if (report.ok) {
-      return res
-        .status(200)
-        .json(report);
-    }
-
-    const statusCode = [
-      "native_sync_verification_failed",
-      "tracking_update_failed_after_native_sync",
-    ].includes(report.status)
-      ? 500
-      : 409;
-
-    return res
-      .status(statusCode)
-      .json(report);
-  } catch (error) {
-    console.error(
-      "Erreur sync-one :",
-      error
-    );
-
-    return res
-      .status(
-        error.statusCode || 500
-      )
-      .json({
-        ok: false,
-
-        engine_stage: "4/6",
-
-        error:
-          error.message ||
-          "Erreur interne du serveur.",
-      });
-  }
   catch (error) {
     console.error(
       "Erreur sync-one :",
