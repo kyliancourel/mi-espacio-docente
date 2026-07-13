@@ -1714,6 +1714,130 @@ async function syncTemplate({
   };
 }
 
+async function syncWorkspace({
+  sql,
+  connection,
+  workspaceTemplates,
+  officialTemplates,
+}) {
+  const officialByTemplateKey =
+    new Map(
+      (officialTemplates || []).map(
+        (official) => [
+          official.template_key,
+          official,
+        ]
+      )
+    );
+
+  const templates = [];
+  const processedTemplateKeys =
+    new Set();
+
+  for (const local of workspaceTemplates || []) {
+    const templateKey =
+      local.template_key;
+
+    processedTemplateKeys.add(
+      templateKey
+    );
+
+    const official =
+      officialByTemplateKey.get(
+        templateKey
+      );
+
+    if (!official) {
+      templates.push({
+        ok: false,
+        engine_stage: "4/6",
+        template_key: templateKey,
+        status:
+          "official_template_not_registered",
+      });
+
+      continue;
+    }
+
+    if (
+      !official.propagate_existing_installations
+    ) {
+      templates.push({
+        ok: true,
+        engine_stage: "4/6",
+        template_key: templateKey,
+        status: "propagation_disabled",
+      });
+
+      continue;
+    }
+
+    if (!official.update_if_outdated) {
+      templates.push({
+        ok: true,
+        engine_stage: "4/6",
+        template_key: templateKey,
+        status: "update_disabled",
+      });
+
+      continue;
+    }
+
+    const report = await syncTemplate({
+      sql,
+      connection,
+      local,
+      official,
+      templateKey,
+    });
+
+    templates.push(report);
+  }
+
+  for (const official of officialTemplates || []) {
+    const templateKey =
+      official.template_key;
+
+    if (
+      processedTemplateKeys.has(
+        templateKey
+      )
+    ) {
+      continue;
+    }
+
+    templates.push({
+      ok: Boolean(
+        official.create_if_missing
+      ),
+      engine_stage: "4/6",
+      template_key: templateKey,
+      status:
+        official.create_if_missing
+          ? "installation_required"
+          : "missing_local_installation",
+    });
+  }
+
+  const synchronized =
+    templates.filter(
+      (template) => template.ok
+    ).length;
+
+  return {
+    ok: true,
+    engine_stage: "4/6",
+    templates,
+    statistics: {
+      total: templates.length,
+      synchronized,
+      failed:
+        templates.length -
+        synchronized,
+    },
+  };
+}
+
 async function runSyncOne(req, res) {
   try {
     if (req.method !== "POST") {
